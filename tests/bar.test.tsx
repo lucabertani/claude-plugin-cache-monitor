@@ -35,7 +35,7 @@ function engine(on: On, opts: { store?: Record<string, unknown>; state?: unknown
   on('classic.PostModelSwitch', () => ({}))
   on('classic.PostCompact', () => ({}))
   const commands: string[] = []
-  on('command.register', (_, e) => { commands.push((e as { name: string }).name); return { value: { command: 'cmaxx' } } as never })
+  on('command.register', (_, e) => { commands.push((e as { name: string }).name); return { value: { command: 'cache-monitor' } } as never })
   on('ui.toast', (_, e) => { toasts.push(JSON.stringify(e)); return { value: undefined } })
   on('ui.render', ($, e) => { const { Text } = $.ui.resolve(e); return <Text>{HIDDEN}</Text> })
   if (opts.state !== undefined) on('state.get', () => ({ value: { value: opts.state, version: 1 } }))
@@ -184,7 +184,7 @@ test('a malformed record from an older version is ignored, never NaN', async ($,
   expect(out.some(t => t?.includes('NaN'))).toBe(false)
 })
 
-test('the close button hides the bar on every surface; /cmaxx brings it back', async ($, on) => {
+test('the close button hides the bar on every surface; /cache-monitor brings it back', async ($, on) => {
   const w = engine(on)
   await start($)
   await w.reply($, { read: 50_000, write: 0 })
@@ -192,7 +192,7 @@ test('the close button hides the bar on every surface; /cmaxx brings it back', a
   await ui.press({ key: 'close' })
   await ui.unmount()
   await expectBar($, HIDDEN)
-  await $.command.run({ command: 'cmaxx', args: '' } as never)
+  await $.command.run({ command: 'cache-monitor', args: '' } as never)
   expect((await bars($))[0]?.startsWith('🟢')).toBe(true)
 })
 
@@ -207,7 +207,7 @@ test('vscode: the ✕ sits beside the text, and pressing it hides the bar everyw
   await ui.press({ key: 'close' })
   await ui.unmount()
   await expectBar($, HIDDEN)
-  await $.command.run({ command: 'cmaxx', args: '' } as never)
+  await $.command.run({ command: 'cache-monitor', args: '' } as never)
   expect((await bars($)).every(t => t?.startsWith('🟢'))).toBe(true)
 })
 
@@ -458,7 +458,7 @@ test('send warning in the terminal: a red chat warns, the message still goes thr
 test('a broken store never costs the commands, the bar or the pop-up', async ($, on) => {
   const w = engine(on, { brokenStore: true })
   await start($)
-  expect(w.commands).toEqual(['cmaxx', 'cache-monitor-handoff', 'cache-monitor-model', 'cache-monitor-update', 'cmaxx-stats'])
+  expect(w.commands).toEqual(['cache-monitor', 'cache-monitor-handoff', 'cache-monitor-model', 'cache-monitor-update', 'cache-monitor-stats'])
   await w.reply($, { read: 290_000, write: 0 })
   await w.clock.advance(MIN)
   await expectBar($, '🟢 59:00 min left · next message ≈ $0.06 · 290K / 1M · ✅ Keep going')
@@ -510,9 +510,9 @@ test('handoff: a /clear more than 30 s later (your own) gets an empty box, not t
   expect(h.calls.fills).toEqual([])
 })
 
-// --- /cmaxx-stats (0.3.0) --------------------------------------------------------
+// --- /cache-monitor-stats (0.3.0) --------------------------------------------------------
 async function stats($: Dollar) {
-  return String((await $.command.run({ command: 'cmaxx-stats', args: '' } as never)).text)
+  return String((await $.command.run({ command: 'cache-monitor-stats', args: '' } as never)).text)
 }
 
 test('stats: replies, a cold rebuild after expiry, and all chats adding up', async ($, on) => {
@@ -546,7 +546,7 @@ test('stats: a handoff on an expired chat counts the notice\'s saving and Haiku\
   expect(h.calls.notices[0]).toContain('You saved approx 174K tokens and $1.72.')
 })
 
-test('stats: a broken store still answers /cmaxx-stats, with zeros', async ($, on) => {
+test('stats: a broken store still answers /cache-monitor-stats, with zeros', async ($, on) => {
   engine(on, { brokenStore: true })
   await start($)
   expect(await stats($)).toContain('| Replies | 0 | 0 |')

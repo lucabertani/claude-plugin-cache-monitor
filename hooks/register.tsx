@@ -10,7 +10,7 @@ import { PRICES_DATE, WAITING, isDevCopy, addStats, bundledPrices, costs, decide
 import type { Stats } from './logic'
 
 const KEEP_MS = 7 * 24 * 60 * 60 * 1000 // saved chats older than this are pruned; an older chat refills on resume
-const STATS_KEEP_MS = 90 * 24 * 60 * 60 * 1000 // a chat's /cmaxx-stats counts (your call); then folded into st:retired
+const STATS_KEEP_MS = 90 * 24 * 60 * 60 * 1000 // a chat's /cache-monitor-stats counts (your call); then folded into st:retired
 const TOMBSTONE_MS = 365 * 24 * 60 * 60 * 1000 // a retired chat's marker, so a resume doesn't read its history again
 const DAY_MS = 24 * 60 * 60 * 1000
 const MAX_READ = 4 * 1024 * 1024 // $.fs.read refuses bigger files
@@ -20,7 +20,7 @@ const SEED_MS = 30_000 // a handoff line older than this is stale: a later /clea
 // `shape` declines a record an older version stored in another form (no NaN:NaN).
 const last = atom({ plugin: 'cache-monitor', key: 'last' } as const, null, { shape: 'rec-2' })
 const tick = atom({ plugin: 'cache-monitor', key: 'tick' } as const, 0)
-// Closed with the bar's ✕ for this chat; /cmaxx brings it back.
+// Closed with the bar's ✕ for this chat; /cache-monitor brings it back.
 const hidden = atom({ plugin: 'cache-monitor', key: 'hidden' } as const, false)
 
 // Module variables survive /clear ($.state does not): the handoff line waiting for the
@@ -100,8 +100,8 @@ async function prune($: EngineInterface) {
   }
 }
 
-// /cmaxx-stats counters, per chat. A turn's counts wait in memory and are written once, at the
-// turn's end (or when /cmaxx-stats asks); All chats is summed from these keys when asked.
+// /cache-monitor-stats counters, per chat. A turn's counts wait in memory and are written once, at the
+// turn's end (or when /cache-monitor-stats asks); All chats is summed from these keys when asked.
 // shortcut: a crash mid-turn loses that turn's counts; write per step if that ever matters.
 const pending = new Map<string, Partial<Stats>>()
 let isInteractive = true // claude -p, the SDK and observer sessions aren't counted
@@ -122,7 +122,7 @@ async function flush($: EngineInterface) {
 
 // A chat this plugin hasn't counted from its start: read its history from the transcript once
 // (4 MiB at most, $.fs.read's limit), adding only what live counting hasn't already. Too big to
-// read: counted from now on, and /cmaxx-stats says "since <date>".
+// read: counted from now on, and /cache-monitor-stats says "since <date>".
 async function fillIn($: EngineInterface, sessionId: string, path: string | undefined, ttlMin: number, isFork: boolean) {
   if (!isInteractive || !path) return
   const key = `st:${sessionId}`
@@ -154,11 +154,11 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     isInteractive = e.isInteractive !== false
     // commands and ticker first: a broken store must never cost the user the bar or the commands
-    await $.command.register({ name: 'cmaxx', description: 'Show or hide the cache-monitor bar' })
+    await $.command.register({ name: 'cache-monitor', description: 'Show or hide the cache-monitor bar' })
     await $.command.register({ name: 'cache-monitor-handoff', description: 'Summarize this chat with a cheap model (Haiku by default, see the handoffModel option; the expired cache is never resent) and start a fresh chat from it', argumentHint: '[model: haiku | sonnet | opus | claude-…]' })
     await $.command.register({ name: 'cache-monitor-model', description: 'Show or set the model /cache-monitor-handoff uses (a name from the list, or any model id)', argumentHint: '[haiku | sonnet | opus | claude-…]' })
     await $.command.register({ name: 'cache-monitor-update', description: 'Update cache-monitor to the latest version, or refresh its model prices (reads this plugin\'s GitHub files; sends nothing)' })
-    await $.command.register({ name: 'cmaxx-stats', description: 'Show what cache-monitor counted: handoff savings, cold rebuilds, cache hit rate, for this chat and all chats' })
+    await $.command.register({ name: 'cache-monitor-stats', description: 'Show what cache-monitor counted: handoff savings, cold rebuilds, cache hit rate, for this chat and all chats' })
     // Each second: redraw the bar (it computes from the wall clock, so sleep or a
     // paused timer can't drift it) and pop up once when a big chat's cache expires.
     $.clock.every(1000, () => {
@@ -291,17 +291,17 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // a turn's /cmaxx-stats counts are written once, when it ends
+  // a turn's /cache-monitor-stats counts are written once, when it ends
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     await flush($).catch(() => {})
     return r
   })
 
-  on('command.run', { command: 'cmaxx' }, async $ => {
+  on('command.run', { command: 'cache-monitor' }, async $ => {
     const isHidden = !(await read($, hidden))
     await update($, hidden, () => isHidden)
-    return { text: isHidden ? 'cache-monitor bar hidden. Type /cmaxx to show it.' : 'cache-monitor bar shown.' }
+    return { text: isHidden ? 'cache-monitor bar hidden. Type /cache-monitor to show it.' : 'cache-monitor bar shown.' }
   })
 
   // /cache-monitor-update: the plugin's only network use, and only when you run it. GETs of this
@@ -354,7 +354,7 @@ export const register: Register = (on, options) => {
     return { text: isNothingChecked ? `cache-monitor: ${lines.join(' ')} Nothing changed.` : lines.join(' ') }
   })
 
-  on('command.run', { command: 'cmaxx-stats' }, async $ => {
+  on('command.run', { command: 'cache-monitor-stats' }, async $ => {
     await flush($).catch(() => {}) // include the turn in progress
     const get = (k: string) => $.store.get(k).catch(() => undefined)
     const now = await $.clock.now()

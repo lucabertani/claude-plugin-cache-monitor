@@ -1,6 +1,6 @@
 {
   "name": "cache-monitor",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Shows how long Claude's chat memory (prompt cache) stays active and what your next message costs, with a plain-language tip",
   "types": "./types/index.d.ts",
   "userConfig": {

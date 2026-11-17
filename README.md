@@ -33,17 +33,17 @@ One line above the prompt, redrawn every second:
 
 Example: `🟢 47:05 min left · next message ≈ $0.05 · 228K / 1M · ✅ Keep going`
 
-The ✕ on the right hides the bar for the current chat; `/cmaxx` brings it back.
+The ✕ on the right hides the bar for the current chat; `/cache-monitor` brings it back.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `/cmaxx` | Show or hide the bar. |
+| `/cache-monitor` | Show or hide the bar. |
 | `/cache-monitor-handoff [model]` | Summarizes the chat with a cheap model (Haiku by default) and starts a fresh chat from the summary. The expired cache is **never** resent to your main model. The summary is saved to `.claude/handoffs/<date>-<id>.md` (git-ignored). In the terminal and VS Code the chat is cleared and the prompt box is pre-filled with `Read <file> and continue from where we left off.` (not sent: you send it). In the desktop app the line is copied to the clipboard for a new chat. The new chat keeps your current main model. |
 | `/cache-monitor-model [model]` | Without an argument, shows the current handoff model and the choices. With one, sets it permanently: a listed name sets the picker, any other model id is stored as a custom model. |
 | `/cache-monitor-update` | Checks this repository for a newer version (and runs `claude plugin update` where allowed) and refreshes the model price table. |
-| `/cmaxx-stats` | Handoff savings, cold rebuilds paid, cache hit rate: this chat and all chats. |
+| `/cache-monitor-stats` | Handoff savings, cold rebuilds paid, cache hit rate: this chat and all chats. |
 
 ### Choosing the handoff model
 

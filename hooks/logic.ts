@@ -279,7 +279,7 @@ export function readSettings(o: Record<string, unknown>): Settings {
   }
 }
 
-// /cmaxx-stats: counters per chat (`st:<chat id>`) and for all chats (`st:all`). Counts only, never chat text.
+// /cache-monitor-stats: counters per chat (`st:<chat id>`) and for all chats (`st:all`). Counts only, never chat text.
 export type Stats = {
   since: number // ms epoch of the first count
   replies: number
@@ -316,7 +316,7 @@ export function addStats(s: unknown, d: Partial<Stats>, now: number): Stats {
   return out
 }
 
-// The /cmaxx-stats reply: this chat and all chats side by side.
+// The /cache-monitor-stats reply: this chat and all chats side by side.
 export function statsText(chat: Stats, all: Stats, s: Settings): string {
   const date = (ms: number) => new Date(ms).toISOString().slice(0, 10)
   const usd = (n: number) => (n > 0 ? money(n) : '$0.00')
