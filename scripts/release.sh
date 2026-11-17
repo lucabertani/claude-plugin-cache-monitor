@@ -8,7 +8,7 @@
 # Then run /reload-plugins in open chats, or restart the app.
 set -e
 cd "$(dirname "$0")/.."
-LIVE=../cache-maxxing-live
+LIVE=../cache-monitor-live
 
 if [ "$1" = "--rollback" ]; then
   git -C "$LIVE" checkout -q "v$2"
@@ -36,7 +36,7 @@ fi
 
 claude plugin test . | tail -3
 claude plugin test . >/dev/null 2>&1 || { echo "tests fail: not released"; exit 1; }
-git tag -a "v$V" -m "cache-maxxing $V"
+git tag -a "v$V" -m "cache-monitor $V"
 git -C "$LIVE" checkout -q "v$V"
 echo "released v$V to live. Run /reload-plugins in open chats, or restart the app."
 if git remote get-url origin >/dev/null 2>&1; then

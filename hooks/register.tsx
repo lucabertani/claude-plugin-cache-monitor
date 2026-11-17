@@ -1,4 +1,4 @@
-// cache-maxxing: draws the cache bar described in docs/RULES.md.
+// cache-monitor: draws the cache bar described in docs/RULES.md.
 // All decisions live in ./logic.ts; this file only wires events, state and drawing.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
@@ -18,10 +18,10 @@ const REPO_RAW = 'https://raw.githubusercontent.com/lucabertani/claude-plugin-ca
 const SEED_MS = 30_000 // a handoff line older than this is stale: a later /clear of your own gets an empty box
 
 // `shape` declines a record an older version stored in another form (no NaN:NaN).
-const last = atom({ plugin: 'cache-maxxing', key: 'last' } as const, null, { shape: 'rec-2' })
-const tick = atom({ plugin: 'cache-maxxing', key: 'tick' } as const, 0)
+const last = atom({ plugin: 'cache-monitor', key: 'last' } as const, null, { shape: 'rec-2' })
+const tick = atom({ plugin: 'cache-monitor', key: 'tick' } as const, 0)
 // Closed with the bar's ✕ for this chat; /cmaxx brings it back.
-const hidden = atom({ plugin: 'cache-maxxing', key: 'hidden' } as const, false)
+const hidden = atom({ plugin: 'cache-monitor', key: 'hidden' } as const, false)
 
 // Module variables survive /clear ($.state does not): the handoff line waiting for the
 // fresh chat, and the transcript path from the latest SessionStart.
@@ -45,7 +45,7 @@ async function clearThenSeed($: EngineInterface, line: string) {
       await $.command.run({ command: 'clear' })
       return // the clear SessionStart puts the line in the fresh chat's box
     } catch (err) {
-      $.ui.log(`cache-maxxing: /clear refused after ${wait} ms: ${String(err)}`, { to: 'debug' })
+      $.ui.log(`cache-monitor: /clear refused after ${wait} ms: ${String(err)}`, { to: 'debug' })
     }
   }
   pendingSeed = undefined
@@ -154,11 +154,11 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     isInteractive = e.isInteractive !== false
     // commands and ticker first: a broken store must never cost the user the bar or the commands
-    await $.command.register({ name: 'cmaxx', description: 'Show or hide the cache-maxxing bar' })
+    await $.command.register({ name: 'cmaxx', description: 'Show or hide the cache-monitor bar' })
     await $.command.register({ name: 'cache-monitor-handoff', description: 'Summarize this chat with a cheap model (Haiku by default, see the handoffModel option; the expired cache is never resent) and start a fresh chat from it', argumentHint: '[model: haiku | sonnet | opus | claude-…]' })
     await $.command.register({ name: 'cache-monitor-model', description: 'Show or set the model /cache-monitor-handoff uses (a name from the list, or any model id)', argumentHint: '[haiku | sonnet | opus | claude-…]' })
-    await $.command.register({ name: 'cache-monitor-update', description: 'Update cache-maxxing to the latest version, or refresh its model prices (reads this plugin\'s GitHub files; sends nothing)' })
-    await $.command.register({ name: 'cmaxx-stats', description: 'Show what cache-maxxing counted: handoff savings, cold rebuilds, cache hit rate, for this chat and all chats' })
+    await $.command.register({ name: 'cache-monitor-update', description: 'Update cache-monitor to the latest version, or refresh its model prices (reads this plugin\'s GitHub files; sends nothing)' })
+    await $.command.register({ name: 'cmaxx-stats', description: 'Show what cache-monitor counted: handoff savings, cold rebuilds, cache hit rate, for this chat and all chats' })
     // Each second: redraw the bar (it computes from the wall clock, so sleep or a
     // paused timer can't drift it) and pop up once when a big chat's cache expires.
     $.clock.every(1000, () => {
@@ -301,7 +301,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'cmaxx' }, async $ => {
     const isHidden = !(await read($, hidden))
     await update($, hidden, () => isHidden)
-    return { text: isHidden ? 'cache-maxxing bar hidden. Type /cmaxx to show it.' : 'cache-maxxing bar shown.' }
+    return { text: isHidden ? 'cache-monitor bar hidden. Type /cmaxx to show it.' : 'cache-monitor bar shown.' }
   })
 
   // /cache-monitor-update: the plugin's only network use, and only when you run it. GETs of this
@@ -318,14 +318,14 @@ export const register: Register = (on, options) => {
     try {
       const mine = String((JSON.parse(String(await $.fs.read(`${$.plugin.root}/.claude-plugin/plugin.json`))) as { version?: unknown }).version)
       const latest = String((await get('.claude-plugin/plugin.json') as { version?: unknown }).version)
-      if (!newerVersion(latest, mine)) lines.push(`cache-maxxing ${mine} is the latest version.`)
+      if (!newerVersion(latest, mine)) lines.push(`cache-monitor ${mine} is the latest version.`)
       else if (isDevCopy($.plugin.name)) lines.push(`Version ${latest} is out (this is the dev copy, ${mine}: not updated).`)
       else {
-        const run = await $.process.run(['claude', 'plugin', 'update', 'cache-maxxing@cache-maxxing'], { timeoutMs: 120_000 }).catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: String(err) }))
-        $.ui.log(`cache-maxxing: plugin update exit ${run.exitCode}: ${run.stderr.slice(0, 300)}`, { to: 'debug' })
+        const run = await $.process.run(['claude', 'plugin', 'update', 'cache-monitor@cache-monitor'], { timeoutMs: 120_000 }).catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: String(err) }))
+        $.ui.log(`cache-monitor: plugin update exit ${run.exitCode}: ${run.stderr.slice(0, 300)}`, { to: 'debug' })
         lines.push(run.exitCode === 0
-          ? `Updated cache-maxxing ${mine} → ${latest}. Run /reload-plugins (or restart the app) to use it.`
-          : `Version ${latest} is out (you have ${mine}). To update: in a terminal run \`claude plugin update cache-maxxing@cache-maxxing\`, or in the desktop app open + → Plugins → Manage plugins. Then run /reload-plugins. Tip: \`/plugin\` → Marketplaces → cache-maxxing → Enable auto-update keeps it current.`)
+          ? `Updated cache-monitor ${mine} → ${latest}. Run /reload-plugins (or restart the app) to use it.`
+          : `Version ${latest} is out (you have ${mine}). To update: in a terminal run \`claude plugin update cache-monitor@cache-monitor\`, or in the desktop app open + → Plugins → Manage plugins. Then run /reload-plugins. Tip: \`/plugin\` → Marketplaces → cache-monitor → Enable auto-update keeps it current.`)
       }
     } catch (err) {
       lines.push(`Couldn't check for a new version (${String(err).slice(0, 200)}).`)
@@ -351,7 +351,7 @@ export const register: Register = (on, options) => {
       lines.push(`Prices not checked (${String(err).slice(0, 200)}).`)
     }
     const isNothingChecked = lines.every(l => l.startsWith("Couldn't") || l.startsWith('Prices not checked'))
-    return { text: isNothingChecked ? `cache-maxxing: ${lines.join(' ')} Nothing changed.` : lines.join(' ') }
+    return { text: isNothingChecked ? `cache-monitor: ${lines.join(' ')} Nothing changed.` : lines.join(' ') }
   })
 
   on('command.run', { command: 'cmaxx-stats' }, async $ => {
@@ -372,7 +372,7 @@ export const register: Register = (on, options) => {
     const model = args ? validModel(args) : settings.handoffModel
     if (!model) return { text: `cache-monitor: "${args.slice(0, 60)}" is not a model name (try haiku, sonnet, opus or a full id like claude-haiku-5-5). Nothing written.` }
     try {
-      $.ui.toast('cache-maxxing: writing the handoff…')
+      $.ui.toast('cache-monitor: writing the handoff…')
       const skill = parseSkill(String(await $.fs.read(`${$.plugin.root}/hooks/handoff-skill.md`)))
       const messages = await $.session.messages()
       const sessionId = await $.session.id()
@@ -427,7 +427,7 @@ export const register: Register = (on, options) => {
       const kept = await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } }).catch(() => ({ deny: 'error' }))
       return kept.deny ? { text } : {}
     } catch (err) {
-      return { text: `cache-maxxing: no handoff written (${String(err)}). This chat is untouched.` }
+      return { text: `cache-monitor: no handoff written (${String(err)}). This chat is untouched.` }
     }
   })
 

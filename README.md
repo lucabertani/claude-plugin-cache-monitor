@@ -1,4 +1,4 @@
-# cache-maxxing (Claude Code prompt-cache monitor)
+# cache-monitor (Claude Code prompt-cache monitor)
 
 Shows, right above the Claude Code prompt, how long Claude's prompt cache stays valid and what your next message will cost. When the cache has expired it suggests a cheap handoff: a small model summarizes the chat and you continue in a fresh, much smaller context.
 
@@ -7,7 +7,7 @@ Shows, right above the Claude Code prompt, how long Claude's prompt cache stays 
 At the prompt of a Claude Code terminal session:
 
 ```
-/plugin install cache-maxxing --marketplace lucabertani/claude-plugin-cache-monitor
+/plugin install cache-monitor --marketplace lucabertani/claude-plugin-cache-monitor
 ```
 
 Answer `y` to add the marketplace, then pick a scope (user scope = every project).
@@ -15,7 +15,7 @@ Answer `y` to add the marketplace, then pick a scope (user scope = every project
 From a shell:
 
 ```
-claude plugin install cache-maxxing --marketplace lucabertani/claude-plugin-cache-monitor
+claude plugin install cache-monitor --marketplace lucabertani/claude-plugin-cache-monitor
 ```
 
 In the desktop app: click **+** next to the prompt box → **Plugins** → **Add marketplace** with `lucabertani/claude-plugin-cache-monitor` → **Add plugin**.
@@ -54,10 +54,10 @@ The ✕ on the right hides the bar for the current chat; `/cmaxx` brings it back
 
 ## Settings
 
-`/plugin` → **cache-maxxing** → options, or from a shell:
+`/plugin` → **cache-monitor** → options, or from a shell:
 
 ```
-echo '{"handoffModel":"sonnet"}' | claude plugin configure cache-maxxing --values-stdin
+echo '{"handoffModel":"sonnet"}' | claude plugin configure cache-monitor --values-stdin
 ```
 
 | Option | Default | Meaning |

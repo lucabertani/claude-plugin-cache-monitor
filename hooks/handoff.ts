@@ -89,7 +89,7 @@ export function factsBlock(f: Facts, n: Numbers, withLastMessage = true): string
   const nums = [
     n.tokens !== undefined && `- **Chat size:** ${n.tokens} tokens${n.window ? ` of a ${n.window} window` : ''}`,
     n.model && `- **Model:** ${n.model}`,
-    n.bar && `- **cache-maxxing bar at handoff:** ${n.bar}`,
+    n.bar && `- **cache-monitor bar at handoff:** ${n.bar}`,
   ].filter(Boolean)
   const all = `## Handoff Numbers
 ${nums.length ? nums.join('\n') : 'unknown'}

@@ -1,4 +1,4 @@
-// Pure logic for the cache-maxxing bar: prices, TTL learning, and the rules in
+// Pure logic for the cache-monitor bar: prices, TTL learning, and the rules in
 // docs/RULES.md. No $ here, so it is testable on its own and shared by every surface.
 import type { Rec } from '../types'
 
@@ -241,7 +241,7 @@ function decideBase(rec: Rec, now: number, s: Settings): Verdict {
 }
 
 // Shown before this chat's first reply, when there is nothing to measure yet.
-export const WAITING = '⚪️ cache-maxxing will start after you send a message'
+export const WAITING = '⚪️ cache-monitor will start after you send a message'
 
 // The heads-up when you send into a red chat; the cause decides the wording.
 export function sendWarning(rec: Rec): string {
@@ -336,7 +336,7 @@ export function statsText(chat: Stats, all: Stats, s: Settings): string {
   ]
   const lines = rows.filter(([, , show]) => show !== false).map(([name, f]) => `| ${name} | ${f(chat)} | ${f(all)} |`)
   return [
-    'cache-maxxing stats',
+    'cache-monitor stats',
     '',
     `| | This chat${chat.partialSince ? ` (since ${date(chat.partialSince)})` : ''} | All chats |`,
     '|---|---|---|',
@@ -401,8 +401,8 @@ export function sumStats(chats: unknown[], retired: unknown, now: number): Stats
   return all
 }
 
-// The dev copy (built by scripts/dev-sync.sh as cache-maxxing-dev) never updates the real install.
-// endsWith: dev-sync.sh renames every quoted 'cache-maxxing', so an equality check would flip.
+// The dev copy (built by scripts/dev-sync.sh as cache-monitor-dev) never updates the real install.
+// endsWith: dev-sync.sh renames every quoted 'cache-monitor', so an equality check would flip.
 export const isDevCopy = (name: string) => name.endsWith('-dev')
 
 // /cache-monitor-update: "0.10.0" is newer than "0.9.3".

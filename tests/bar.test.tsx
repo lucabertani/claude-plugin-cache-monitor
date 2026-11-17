@@ -9,8 +9,8 @@ const SURFACES = ['desktop', 'vscode', 'terminal'] as const
 const MIN = 60_000
 const T0 = 1_800_000_000_000
 const HIDDEN = '(engine)' // what Claude Code draws when the plugin shows nothing
-const WAITING = '⚪️ cache-maxxing will start after you send a message'
-const BAR = { plugin: 'cache-maxxing', component: 'AbovePrompt', props: { hasSurvey: false, isCollapsed: false, isWorking: false } as never } as const // the kit fills the rest of the band's props
+const WAITING = '⚪️ cache-monitor will start after you send a message'
+const BAR = { plugin: 'cache-monitor', component: 'AbovePrompt', props: { hasSurvey: false, isCollapsed: false, isWorking: false } as never } as const // the kit fills the rest of the band's props
 
 type Body = Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>
 type On = Parameters<Body>[1]
@@ -596,7 +596,7 @@ function updateEngine(on: On, o: { latest?: string; prices?: unknown; processExi
   const w = engine(on, { store: o.store })
   const calls = { argv: [] as string[][], urls: [] as string[] }
   on('fs.read', (_, e) => {
-    if (String((e as { path: string }).path).replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json')) return { value: JSON.stringify({ name: 'cache-maxxing', version: '0.4.0' }) } as never
+    if (String((e as { path: string }).path).replace(/\\/g, '/').endsWith('/.claude-plugin/plugin.json')) return { value: JSON.stringify({ name: 'cache-monitor', version: '0.4.0' }) } as never
     throw new Error('unexpected read')
   })
   on('http.fetch', (_, e) => {
@@ -620,7 +620,7 @@ test('update, same version: only this repo\'s files are read, and a new model is
   const u = updateEngine(on)
   await start($)
   const t = await runUpdate($)
-  expect(t).toBe('cache-maxxing 0.4.0 is the latest version. Prices updated to 2026-12-02: new claude-opus-6.')
+  expect(t).toBe('cache-monitor 0.4.0 is the latest version. Prices updated to 2026-12-02: new claude-opus-6.')
   expect(u.calls.argv).toEqual([])
   expect(u.calls.urls.every(x => x.startsWith('https://raw.githubusercontent.com/lucabertani/claude-plugin-cache-monitor/main/'))).toBe(true)
   await u.reply($, { read: 50_000, write: 0, model: 'claude-opus-6' })
@@ -631,8 +631,8 @@ test('update, same version: only this repo\'s files are read, and a new model is
 test('update, newer version: Claude Code\'s updater runs where it may; elsewhere the reply says how', async ($, on) => {
   const u = updateEngine(on, { latest: '0.5.0', processExit: 0 })
   await start($)
-  expect(await runUpdate($)).toContain('Updated cache-maxxing 0.4.0 → 0.5.0. Run /reload-plugins')
-  expect(u.calls.argv).toEqual([['claude', 'plugin', 'update', 'cache-maxxing@cache-maxxing']])
+  expect(await runUpdate($)).toContain('Updated cache-monitor 0.4.0 → 0.5.0. Run /reload-plugins')
+  expect(u.calls.argv).toEqual([['claude', 'plugin', 'update', 'cache-monitor@cache-monitor']])
 })
 
 test('update, newer version but the updater is refused: manual steps, and prices still refreshed', async ($, on) => {
@@ -647,7 +647,7 @@ test('update, newer version but the updater is refused: manual steps, and prices
 test('update: offline or a bad table changes nothing', async ($, on) => {
   updateEngine(on, { offline: true })
   await start($)
-  expect(await runUpdate($)).toMatch(/^cache-maxxing: Couldn't check for a new version \(.*\)\. Prices not checked \(.*\)\. Nothing changed\.$/)
+  expect(await runUpdate($)).toMatch(/^cache-monitor: Couldn't check for a new version \(.*\)\. Prices not checked \(.*\)\. Nothing changed\.$/)
 })
 
 test('update: a refused price table leaves the prices as they were', async ($, on) => {
@@ -710,7 +710,7 @@ test('update: a failed price download never hides a finished update', async ($, 
   updateEngine(on, { latest: '0.5.0', processExit: 0, pricesFail: true })
   await start($)
   const t = await runUpdate($)
-  expect(t).toContain('Updated cache-maxxing 0.4.0 → 0.5.0. Run /reload-plugins')
+  expect(t).toContain('Updated cache-monitor 0.4.0 → 0.5.0. Run /reload-plugins')
   expect(t).toContain('Prices not checked (')
   expect(t.includes('Nothing changed')).toBe(false)
 })
@@ -746,14 +746,14 @@ test('/cache-monitor-model: a listed name sets the picker; any other id goes to 
   engine(on)
   const vals: Record<string, string> = {}
   const OPTS = ['haiku', 'sonnet', 'opus', 'claude-sonnet-5-5', 'custom']
-  on('config.list', () => ({ value: [{ key: 'cache-maxxing.handoffModel', label: 'Handoff model', kind: 'choice', value: vals['cache-maxxing.handoffModel'] ?? 'haiku', options: OPTS, provider: { plugin: 'cache-maxxing' }, isLocked: false }] }) as never)
+  on('config.list', () => ({ value: [{ key: 'cache-monitor.handoffModel', label: 'Handoff model', kind: 'choice', value: vals['cache-monitor.handoffModel'] ?? 'haiku', options: OPTS, provider: { plugin: 'cache-monitor' }, isLocked: false }] }) as never)
   on('config.set', (_, e) => { const x = e as { key: string; value: string }; vals[x.key] = x.value; return { value: x.value } as never })
   await start($, 'terminal')
   const run = async (args: string) => ((await $.command.run({ command: 'cache-monitor-model', args } as never)) as { text: string }).text
   expect(await run('')).toContain('Handoff model: haiku')
   expect(await run('sonnet')).toBe('Handoff model set to sonnet. /cache-monitor-handoff uses it from now on.')
-  expect(vals).toEqual({ 'cache-maxxing.handoffModel': 'sonnet' })
+  expect(vals).toEqual({ 'cache-monitor.handoffModel': 'sonnet' })
   expect(await run('claude-sonnet-5-5-20260401')).toBe('Handoff model set to claude-sonnet-5-5-20260401 (custom). /cache-monitor-handoff uses it from now on.')
-  expect(vals).toEqual({ 'cache-maxxing.handoffModel': 'custom', 'cache-maxxing.handoffModelCustom': 'claude-sonnet-5-5-20260401' })
+  expect(vals).toEqual({ 'cache-monitor.handoffModel': 'custom', 'cache-monitor.handoffModelCustom': 'claude-sonnet-5-5-20260401' })
   expect(await run('not a model')).toContain('is not a model name')
 })

@@ -20,6 +20,6 @@ labels: bug
 **Where**
 - Surface: <!-- desktop app / VS Code / terminal -->
 - Claude Code version: <!-- `claude --version`, or the app's About -->
-- cache-maxxing version: <!-- in /plugin, or .claude-plugin/plugin.json -->
+- cache-monitor version: <!-- in /plugin, or .claude-plugin/plugin.json -->
 - Model: <!-- e.g. claude-opus-5-5 -->
 - Settings changed from the defaults: <!-- e.g. Show cost as: times -->

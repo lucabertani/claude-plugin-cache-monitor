@@ -190,7 +190,7 @@ test('stats: counts add up, junk counts as empty, the table puts this chat and a
   const chat = addStats(addStats(undefined, { replies: 1, read: 90, write: 10 }, now), { rebuilds: 1, rebuildTokens: 228_000, rebuildUsd: 1.82, handoffs: 1, savedTokens: 183_000, savedUsd: 1.8175 }, now)
   const all = { ...addStats(chat, { replies: 4, read: 100 }, now), chats: 3 }
   expect(statsText(chat, all, DEFAULTS)).toBe([
-    'cache-maxxing stats',
+    'cache-monitor stats',
     '',
     '| | This chat | All chats |',
     '|---|---|---|',
@@ -225,7 +225,7 @@ test('transcript: requests counted once, rebuilds after the cache time, handoffs
     asst('a2', '2026-11-17T10:30:00Z', 50_000, 0),
     asst('a3', '2026-11-17T12:00:00Z', 0, 228_000), // 90 min later: a rebuild
     row({ type: 'system', subtype: 'informational', content: 'Handoff saved to .claude/handoffs/x.md. This command never resent the chat to Opus: no cache read, no rebuild. You saved approx 183K tokens and $1.82.' }),
-    row({ type: 'system', subtype: 'local_command', content: '<local-command-stdout>ponytail+cache-maxxing: Handoff saved to .claude/handoffs/y.md. This command never resent the chat to Opus: no cache read, no rebuild.</local-command-stdout>' }),
+    row({ type: 'system', subtype: 'local_command', content: '<local-command-stdout>ponytail+cache-monitor: Handoff saved to .claude/handoffs/y.md. This command never resent the chat to Opus: no cache read, no rebuild.</local-command-stdout>' }),
     row({ type: 'user', message: { role: 'user', content: 'it said: Handoff saved to z.md. You saved approx 999K tokens and $9.99.' } }), // a quote, not a notice
     row({ type: 'queue-operation', content: 'Handoff saved to q.md. You saved approx 999K tokens and $9.99.' }), // a queued prompt, not a notice
     'not json',
@@ -275,8 +275,8 @@ test('an unknown model nudges to /cache-monitor-update until a downloaded price 
 
 // --- final-review fixes ------------------------------------------------------------
 test('the dev copy is told apart by its -dev suffix, which dev-sync.sh\'s rename cannot flip', () => {
-  expect(isDevCopy('cache-maxxing-dev')).toBe(true)
-  expect(isDevCopy('cache-maxxing')).toBe(false)
+  expect(isDevCopy('cache-monitor-dev')).toBe(true)
+  expect(isDevCopy('cache-monitor')).toBe(false)
   expect(isDevCopy('some-other-plugin')).toBe(false) // an equality check against one name would say true
 })
 
