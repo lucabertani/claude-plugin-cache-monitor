@@ -1,0 +1,59 @@
+{
+  "name": "cache-maxxing",
+  "version": "0.4.0",
+  "description": "Shows how long Claude's chat memory (prompt cache) stays active and what your next message costs, with a plain-language tip",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "rebuildLimitUsd": {
+      "type": "number",
+      "title": "Rebuild limit ($)",
+      "description": "Above this rebuild cost, the bar suggests a new chat instead of carrying on.",
+      "default": 0.5
+    },
+    "warnMinutes": {
+      "type": "number",
+      "title": "Warning time (minutes)",
+      "description": "How early the bar turns yellow before the chat memory expires (1-hour memory only; the 5-minute memory never turns yellow).",
+      "default": 15
+    },
+    "longChatTokens": {
+      "type": "number",
+      "title": "Long chat size (tokens)",
+      "description": "Chat size at which the bar suggests starting a new chat after the current task.",
+      "default": 300000
+    },
+    "costStyle": {
+      "type": "string",
+      "title": "Show cost as",
+      "description": "dollars shows approximate $ amounts; times shows how many times more than a normal message.",
+      "options": [
+        "dollars",
+        "times"
+      ],
+      "default": "dollars"
+    },
+    "memoryMinutes": {
+      "type": "string",
+      "title": "Memory time",
+      "description": "auto = 1 hour (Claude subscription). Choose 5 if you use an API key; 60 forces 1 hour.",
+      "options": [
+        "auto",
+        "5",
+        "60"
+      ],
+      "default": "auto"
+    },
+    "handoffModel": {
+      "type": "string",
+      "title": "Handoff model",
+      "description": "Model /cmaxx-handoff uses to write the summary: an alias (haiku, sonnet, opus) or a full model id such as claude-haiku-5-5. Default haiku.",
+      "default": "haiku"
+    }
+  },
+  "author": {
+    "name": "lucabertani"
+  },
+  "homepage": "https://github.com/lucabertani/claude-plugin-cache-monitor",
+  "repository": "https://github.com/lucabertani/claude-plugin-cache-monitor",
+  "license": "MIT"
+}

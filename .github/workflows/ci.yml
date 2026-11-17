@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: prices.json matches the bundled table
+        run: bun scripts/prices-json.ts && git diff --exit-code prices.json
+      - name: Validate
+        run: claude plugin validate .
+      - name: Test
+        # unverified on CI until the first push: if `plugin test` needs a signed-in Claude Code, drop this step
+        run: claude plugin test .

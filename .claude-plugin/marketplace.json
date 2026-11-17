@@ -1,0 +1,13 @@
+{
+  "name": "cache-maxxing",
+  "owner": {
+    "name": "lucabertani"
+  },
+  "plugins": [
+    {
+      "name": "cache-maxxing",
+      "source": "./"
+    }
+  ],
+  "description": "cache-maxxing: a prompt-cache countdown and cost bar for Claude Code"
+}
