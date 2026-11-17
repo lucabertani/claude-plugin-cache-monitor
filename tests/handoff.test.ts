@@ -1,4 +1,4 @@
-// /cmaxx-handoff's pure parts: facts from code, the abbreviated conversation, the
+// /cache-monitor-handoff's pure parts: facts from code, the abbreviated conversation, the
 // skill file's parts, the brief check and the file the new chat reads.
 import { expect, test } from 'claude-code/testing'
 import type { SessionMessage } from 'claude-code'

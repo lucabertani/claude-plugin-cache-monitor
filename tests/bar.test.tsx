@@ -113,12 +113,12 @@ test('ticks to yellow, then red, with exactly one pop-up', async ($, on) => {
   await start($)
   await w.reply($, { read: 228_000, write: 0 })
   await w.clock.advance(57 * MIN)
-  await expectBar($, '🟡 3:00 min left · next message ≈ $0.05, later ≈ $1.82 (40× more) · 228K / 1M · ⏳ Reply soon or try /cmaxx-handoff')
+  await expectBar($, '🟡 3:00 min left · next message ≈ $0.05, later ≈ $1.82 (40× more) · 228K / 1M · ⏳ Reply soon or try /cache-monitor-handoff')
   await w.clock.advance(15 * MIN)
-  await expectBar($, '🔴 cache expired · next message ≈ $1.82 (40× more) · 228K / 1M · 🔄 Try /cmaxx-handoff to save 170K tokens | $1.71')
+  await expectBar($, '🔴 cache expired · next message ≈ $1.82 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 170K tokens | $1.71')
   await w.clock.advance(5 * MIN)
   // the pop-up says exactly what the bar says
-  expect(w.toasts.filter(t => t.includes('🔴 cache expired · next message ≈ $1.82 (40× more) · 228K / 1M · 🔄 Try /cmaxx-handoff to save 170K tokens | $1.71')).length).toBe(1)
+  expect(w.toasts.filter(t => t.includes('🔴 cache expired · next message ≈ $1.82 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 170K tokens | $1.71')).length).toBe(1)
 })
 
 test('model switch re-prices at once; a resume "switch" does not', async ($, on) => {
@@ -129,7 +129,7 @@ test('model switch re-prices at once; a resume "switch" does not', async ($, on)
   await $.classic.PostModelSwitch({ ...sw, from_model: 'claude-sonnet-5-5', to_model: 'claude-opus-5-5', source: 'resume' } as never)
   expect((await bars($))[0]?.startsWith('🟢')).toBe(true)
   await $.classic.PostModelSwitch({ ...sw, from_model: 'claude-opus-5-5', to_model: 'claude-sonnet-5-5', source: 'command' } as never)
-  await expectBar($, '🔴 cache reset (model changed) · next message ≈ $0.91 (40× more) · 228K / 1M · 🔄 Try /cmaxx-handoff to save 170K tokens | $0.85')
+  await expectBar($, '🔴 cache reset (model changed) · next message ≈ $0.91 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 170K tokens | $0.85')
 })
 
 // Seen live 2026-11-16: /model switches then /compact left the next reply's countdown at 5:00.
@@ -159,7 +159,7 @@ test('older chat: filled in on resume, no reply needed', async ($, on) => {
   engine(on)
   await start($)
   await $.classic.SessionStart({ source: 'resume', session_id: 'chat-1', seconds_since_last_response: 7200, context_tokens: 290_000, prompt_cache_likely_expired: true, model: 'claude-opus-5-5' } as never)
-  await expectBar($, '🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cmaxx-handoff to save 232K tokens | $2.21')
+  await expectBar($, '🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cache-monitor-handoff to save 232K tokens | $2.21')
 })
 
 test('/clear goes back to the waiting line', async ($, on) => {
@@ -234,7 +234,7 @@ test('a closed bar also stops the pop-up', async ($, on) => {
   expect(w.toasts.length).toBe(0)
 })
 
-// --- /cmaxx-handoff -------------------------------------------------------------
+// --- /cache-monitor-handoff -------------------------------------------------------------
 // Everything outside the plugin is a stand-in: the chat, Haiku, the disk, /clear, the box.
 const BRIEF = '## Handoff Confidence\nHigh: all there.\n\n## Last Request from the User\nship it\nStatus: Answered\n\n## Next Steps\n1. Release.'
 
@@ -272,8 +272,8 @@ function handoffEngine(on: On, opts: { reply?: string | null; clearRefusals?: nu
   return { ...w, calls }
 }
 
-async function handoff($: Dollar) {
-  return $.command.run({ command: 'cmaxx-handoff', args: '' } as never)
+async function handoff($: Dollar, args = '') {
+  return $.command.run({ command: 'cache-monitor-handoff', args } as never)
 }
 
 test('handoff: Haiku writes it from the chat read locally; the main model never runs', async ($, on) => {
@@ -458,7 +458,7 @@ test('send warning in the terminal: a red chat warns, the message still goes thr
 test('a broken store never costs the commands, the bar or the pop-up', async ($, on) => {
   const w = engine(on, { brokenStore: true })
   await start($)
-  expect(w.commands).toEqual(['cmaxx', 'cmaxx-handoff', 'cmaxx-update', 'cmaxx-stats'])
+  expect(w.commands).toEqual(['cmaxx', 'cache-monitor-handoff', 'cache-monitor-model', 'cache-monitor-update', 'cmaxx-stats'])
   await w.reply($, { read: 290_000, write: 0 })
   await w.clock.advance(MIN)
   await expectBar($, '🟢 59:00 min left · next message ≈ $0.06 · 290K / 1M · ✅ Keep going')
@@ -472,7 +472,7 @@ test('weeks away: an 8-day-old record is pruned (7-day rule), and a resume still
   await start($)
   await expectBar($, WAITING) // pruned: kept, it would show its expired record
   await $.classic.SessionStart({ source: 'resume', session_id: 'chat-1', seconds_since_last_response: 30 * 24 * 3600, context_tokens: 290_000, prompt_cache_likely_expired: true, model: 'claude-opus-5-5' } as never)
-  await expectBar($, '🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cmaxx-handoff to save 232K tokens | $2.21')
+  await expectBar($, '🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cache-monitor-handoff to save 232K tokens | $2.21')
 })
 
 test('clock set back: a record from the "future" still gives a valid bar', async ($, on) => {
@@ -552,7 +552,7 @@ test('stats: a broken store still answers /cmaxx-stats, with zeros', async ($, o
   expect(await stats($)).toContain('| Replies | 0 | 0 |')
 })
 
-// --- 0.4.0: stats fill-in, /cmaxx-update -----------------------------------------------
+// --- 0.4.0: stats fill-in, /cache-monitor-update -----------------------------------------------
 const TRANSCRIPT = [
   JSON.stringify({ type: 'assistant', timestamp: '2026-11-17T10:00:00Z', message: { id: 'a1', model: 'claude-opus-5-5', usage: { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 228_000, output_tokens: 0 } } }),
   JSON.stringify({ type: 'assistant', timestamp: '2026-11-17T12:00:00Z', message: { id: 'a2', model: 'claude-opus-5-5', usage: { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 228_000, output_tokens: 0 } } }),
@@ -614,7 +614,7 @@ function updateEngine(on: On, o: { latest?: string; prices?: unknown; processExi
   on('ui.log', () => ({ value: undefined }))
   return { ...w, calls }
 }
-const runUpdate = async ($: Dollar) => String((await $.command.run({ command: 'cmaxx-update', args: '' } as never)).text)
+const runUpdate = async ($: Dollar) => String((await $.command.run({ command: 'cache-monitor-update', args: '' } as never)).text)
 
 test('update, same version: only this repo\'s files are read, and a new model is priced at once', async ($, on) => {
   const u = updateEngine(on)
@@ -658,7 +658,7 @@ test('update: a refused price table leaves the prices as they were', async ($, o
   await expectBar($, '🟢 1:00:00 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
 })
 
-test('prices saved by an earlier /cmaxx-update are used after a restart', async ($, on) => {
+test('prices saved by an earlier /cache-monitor-update are used after a restart', async ($, on) => {
   const w = engine(on, { store: { prices: { sourceDate: '2026-12-02', prices: { 'opus-6': [5, 0.5] } } } })
   await start($)
   await w.reply($, { read: 50_000, write: 0, model: 'claude-opus-6' })
@@ -730,4 +730,30 @@ test('handoff: the handoffModel option picks the summary model', { options: { ha
   await handoff($)
   expect(h.calls.model[0]!.model).toBe('claude-sonnet-5-5')
   expect(h.calls.writes[0]!.text).toContain('Sonnet wrote the judgment sections')
+})
+
+test('handoff: an argument picks the model for this run only; junk is refused', async ($, on) => {
+  const h = handoffEngine(on)
+  await start($, 'terminal')
+  await handoff($, ' opus ')
+  expect(h.calls.model[0]!.model).toBe('opus')
+  const r = (await handoff($, 'not a model')) as { text?: string }
+  expect(r.text).toContain('is not a model name')
+  expect(h.calls.model.length).toBe(1)
+})
+
+test('/cache-monitor-model: a listed name sets the picker; any other id goes to the custom field', async ($, on) => {
+  engine(on)
+  const vals: Record<string, string> = {}
+  const OPTS = ['haiku', 'sonnet', 'opus', 'claude-sonnet-5-5', 'custom']
+  on('config.list', () => ({ value: [{ key: 'cache-maxxing.handoffModel', label: 'Handoff model', kind: 'choice', value: vals['cache-maxxing.handoffModel'] ?? 'haiku', options: OPTS, provider: { plugin: 'cache-maxxing' }, isLocked: false }] }) as never)
+  on('config.set', (_, e) => { const x = e as { key: string; value: string }; vals[x.key] = x.value; return { value: x.value } as never })
+  await start($, 'terminal')
+  const run = async (args: string) => ((await $.command.run({ command: 'cache-monitor-model', args } as never)) as { text: string }).text
+  expect(await run('')).toContain('Handoff model: haiku')
+  expect(await run('sonnet')).toBe('Handoff model set to sonnet. /cache-monitor-handoff uses it from now on.')
+  expect(vals).toEqual({ 'cache-maxxing.handoffModel': 'sonnet' })
+  expect(await run('claude-sonnet-5-5-20260401')).toBe('Handoff model set to claude-sonnet-5-5-20260401 (custom). /cache-monitor-handoff uses it from now on.')
+  expect(vals).toEqual({ 'cache-maxxing.handoffModel': 'custom', 'cache-maxxing.handoffModelCustom': 'claude-sonnet-5-5-20260401' })
+  expect(await run('not a model')).toContain('is not a model name')
 })

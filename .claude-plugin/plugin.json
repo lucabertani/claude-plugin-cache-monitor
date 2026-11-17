@@ -46,8 +46,26 @@
     "handoffModel": {
       "type": "string",
       "title": "Handoff model",
-      "description": "Model /cmaxx-handoff uses to write the summary: an alias (haiku, sonnet, opus) or a full model id such as claude-haiku-5-5. Default haiku.",
+      "description": "Model /cache-monitor-handoff uses to write the summary (haiku is the cheapest). Pick \"custom\" to use the id you type in \"Custom handoff model\". Also settable with /cache-monitor-model.",
+      "options": [
+        "haiku",
+        "sonnet",
+        "opus",
+        "claude-haiku-5-5",
+        "claude-haiku-4-5",
+        "claude-sonnet-5-5",
+        "claude-sonnet-4-6",
+        "claude-opus-5-5",
+        "claude-fable-5-2",
+        "custom"
+      ],
       "default": "haiku"
+    },
+    "handoffModelCustom": {
+      "type": "string",
+      "title": "Custom handoff model",
+      "description": "Used only when Handoff model is \"custom\": any alias or full model id, e.g. claude-sonnet-5-5-20260401.",
+      "default": ""
     }
   },
   "author": {

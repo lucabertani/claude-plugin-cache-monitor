@@ -8,7 +8,7 @@ export type Settings = {
   longChatTokens: number
   costStyle: 'dollars' | 'times'
   memoryMinutes: 'auto' | '5' | '60'
-  handoffModel: string // the model /cmaxx-handoff summarizes with: an alias (haiku) or a full model id
+  handoffModel: string // the model /cache-monitor-handoff summarizes with: an alias (haiku) or a full model id
 }
 
 export const DEFAULTS: Settings = {
@@ -50,11 +50,11 @@ const PRICES: Record<string, [input: number, read: number]> = {
 
 // Exact version match: 'claude-opus-5-6' is unknown, not Opus 5's price. Accepts
 // platform prefixes (anthropic., us.anthropic.), dates, [1m], @versions and -fast.
-// The day PRICES was last checked; a downloaded table older than this is refused (/cmaxx-update).
+// The day PRICES was last checked; a downloaded table older than this is refused (/cache-monitor-update).
 export const PRICES_DATE = '2026-11-17'
 export const bundledPrices = () => ({ sourceDate: PRICES_DATE, prices: PRICES })
 
-// Prices /cmaxx-update downloaded (validated), used over the bundled table until a newer release.
+// Prices /cache-monitor-update downloaded (validated), used over the bundled table until a newer release.
 let priceOverride: Record<string, [number, number]> | null = null
 export function setPriceOverride(p: Record<string, [number, number]> | null) {
   priceOverride = p
@@ -68,7 +68,7 @@ function parseModel(model: string): { key: string; family: string; v: [number, n
 }
 
 // True for a model newer than every priced one of its family (or a family not priced at all):
-// the moment /cmaxx-update helps. An old unpriced model (Sonnet 3.7) is not "new".
+// the moment /cache-monitor-update helps. An old unpriced model (Sonnet 3.7) is not "new".
 export function isNewModel(model: string): boolean {
   const m = parseModel(model)
   if (!m) return false
@@ -123,6 +123,28 @@ export function summaryUsd(model: string, inTok: number, outTok: number): number
   return p ? (inTok * p.input + outTok * p.input * 5) / 1e6 : null
 }
 
+// Models offered when choosing the handoff model: the aliases, then every priced model id,
+// newest first, each with its input price. Any other id still works when typed in full.
+const ALIAS_NOTES: Record<string, string> = { haiku: 'cheapest, default', sonnet: 'balanced', opus: 'best summary, costs more', fable: 'top model, costs the most' }
+export function modelChoices(): { text: string; description: string }[] {
+  const table = { ...PRICES, ...priceOverride }
+  const priced = (id: string) => { const p = priceOf(id, 0); return p ? `$${p.input}/M tokens in` : 'price unknown' }
+  const aliases = Object.keys(ALIASES).map(a => ({ text: a, description: `→ ${ALIASES[a]} · ${ALIAS_NOTES[a]} · ${priced(ALIASES[a]!)}` }))
+  const ids = Object.keys(table)
+    .map(k => parseModel(`claude-${k}`)!)
+    .sort((a, b) => a.family.localeCompare(b.family) || b.v[0] - a.v[0] || b.v[1] - a.v[1])
+    .map(m => ({ text: `claude-${m.key}`, description: priced(`claude-${m.key}`) }))
+  return [...aliases, ...ids]
+}
+
+// Typeahead rows for "/cache-monitor-handoff <model>" and "/cache-monitor-model <model>": only for the first argument.
+export function handoffModelSuggestions(text: string, start: number, token: string): { text: string; description: string }[] {
+  const m = /^\/cache-monitor-(?:handoff|model)[ \t]+/.exec(text)
+  if (!m || start !== m[0].length) return []
+  const t = token.toLowerCase()
+  return modelChoices().filter(c => c.text.includes(t)).slice(0, 15)
+}
+
 export const haikuUsd = (inTok: number, outTok: number): number => summaryUsd('haiku', inTok, outTok)!
 
 // What a handoff costs before it runs. Estimate: the chat sent to Haiku is capped at 150,000
@@ -156,7 +178,7 @@ export function money(usd: number): string {
 }
 
 // What the bar suggests instead of commanding (built in 0.2.0)
-export const HANDOFF = '/cmaxx-handoff'
+export const HANDOFF = '/cache-monitor-handoff'
 const SUGGEST_NEW = `🔄 Try ${HANDOFF} or a new chat`
 const RESET_LABEL = { model: 'cache reset (model changed)', compact: 'cache reset (chat compacted)' } as const
 
@@ -180,8 +202,8 @@ export function clock(ms: number): string {
 // the state, so the text is only: time, next-message cost, context, recommendation.
 export function decide(rec: Rec, now: number, s: Settings): Verdict {
   const v = decideBase(rec, now, s)
-  // no price for this model (likely a new one): the moment /cmaxx-update helps
-  return costs(rec) || !isNewModel(rec.model) ? v : { ...v, text: `${v.text} · new model? try /cmaxx-update` }
+  // no price for this model (likely a new one): the moment /cache-monitor-update helps
+  return costs(rec) || !isNewModel(rec.model) ? v : { ...v, text: `${v.text} · new model? try /cache-monitor-update` }
 }
 
 function decideBase(rec: Rec, now: number, s: Settings): Verdict {
@@ -240,6 +262,10 @@ export function fromSessionStart(
   }
 }
 
+// A model name as typed (option or /cache-monitor-handoff argument): an alias or id, nothing else.
+export const validModel = (v: unknown): string | undefined =>
+  typeof v === 'string' && /^[\w.:@\[\]-]{1,100}$/.test(v.trim()) ? v.trim() : undefined
+
 export function readSettings(o: Record<string, unknown>): Settings {
   const num = (v: unknown, d: number) => (typeof v === 'number' && v > 0 ? v : typeof v === 'string' && Number(v) > 0 ? Number(v) : d)
   return {
@@ -248,7 +274,8 @@ export function readSettings(o: Record<string, unknown>): Settings {
     longChatTokens: num(o.longChatTokens, DEFAULTS.longChatTokens),
     costStyle: o.costStyle === 'times' ? 'times' : 'dollars',
     memoryMinutes: o.memoryMinutes === '5' || o.memoryMinutes === '60' ? o.memoryMinutes : 'auto',
-    handoffModel: typeof o.handoffModel === 'string' && /^[\w.:@\[\]-]{1,100}$/.test(o.handoffModel.trim()) ? o.handoffModel.trim() : DEFAULTS.handoffModel,
+    // "custom" in the picker: the free-text field holds the model
+    handoffModel: (o.handoffModel === 'custom' ? validModel(o.handoffModelCustom) : validModel(o.handoffModel)) ?? DEFAULTS.handoffModel,
   }
 }
 
@@ -378,7 +405,7 @@ export function sumStats(chats: unknown[], retired: unknown, now: number): Stats
 // endsWith: dev-sync.sh renames every quoted 'cache-maxxing', so an equality check would flip.
 export const isDevCopy = (name: string) => name.endsWith('-dev')
 
-// /cmaxx-update: "0.10.0" is newer than "0.9.3".
+// /cache-monitor-update: "0.10.0" is newer than "0.9.3".
 export function newerVersion(a: string, b: string): boolean {
   const pa = a.split('.').map(Number), pb = b.split('.').map(Number)
   for (let i = 0; i < 3; i++) {

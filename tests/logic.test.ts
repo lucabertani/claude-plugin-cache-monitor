@@ -3,7 +3,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { Rec } from '../types'
-import { readSettings, summaryUsd, modelLabel } from '../hooks/logic'
+import { readSettings, summaryUsd, modelLabel, modelChoices, handoffModelSuggestions } from '../hooks/logic'
 import { DEFAULTS, HAIKU_ESTIMATE, PRICES_DATE, addStats, clock, costs, decide, emptyStats, fromSessionStart, haikuUsd, money, newerVersion, priceOf, sendWarning, setPriceOverride, statsFromTranscript, statsText, isDevCopy, isNewModel, sumStats, tokens, ttlFor, validatePrices } from '../hooks/logic'
 import { savingsLine } from '../hooks/handoff'
 
@@ -68,11 +68,11 @@ test('green, keep going', async () => {
 })
 
 test('green, long chat', async () => {
-  expect(decide(rec({ prefix: 320_000 }), 10 * MIN, DEFAULTS).text).toBe('🟢 50:00 min left · next message ≈ $0.06 · 320K / 1M · 🔄 Try /cmaxx-handoff or a new chat')
+  expect(decide(rec({ prefix: 320_000 }), 10 * MIN, DEFAULTS).text).toBe('🟢 50:00 min left · next message ≈ $0.06 · 320K / 1M · 🔄 Try /cache-monitor-handoff or a new chat')
 })
 
 test('yellow on 1h cache; 15:00 left is yellow, 15:01 is green', async () => {
-  expect(decide(rec(), 57 * MIN, DEFAULTS).text).toBe('🟡 3:00 min left · next message ≈ $0.05, later ≈ $1.82 (40× more) · 228K / 1M · ⏳ Reply soon or try /cmaxx-handoff')
+  expect(decide(rec(), 57 * MIN, DEFAULTS).text).toBe('🟡 3:00 min left · next message ≈ $0.05, later ≈ $1.82 (40× more) · 228K / 1M · ⏳ Reply soon or try /cache-monitor-handoff')
   expect(decide(rec(), 45 * MIN, DEFAULTS).light).toBe('yellow')
   expect(decide(rec(), 45 * MIN - 1_000, DEFAULTS).light).toBe('green')
 })
@@ -86,7 +86,7 @@ test('5m cache never shows yellow', async () => {
 
 test('red, expired big chat: popup once', async () => {
   const v = decide(rec(), 72 * MIN, DEFAULTS)
-  expect(v.text).toBe('🔴 cache expired · next message ≈ $1.82 (40× more) · 228K / 1M · 🔄 Try /cmaxx-handoff to save 170K tokens | $1.71')
+  expect(v.text).toBe('🔴 cache expired · next message ≈ $1.82 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 170K tokens | $1.71')
   expect(v.shouldPopup).toBe(true)
   expect(decide(rec({ warned: true }), 72 * MIN, DEFAULTS).shouldPopup).toBe(false)
 })
@@ -99,7 +99,7 @@ test('orange, expired small chat: no popup', async () => {
 
 test('model switch: reset at once on the new model, no popup', async () => {
   const v = decide(rec({ model: 'claude-sonnet-5-5', resetBy: 'model' }), 20 * MIN, DEFAULTS)
-  expect(v.text).toBe('🔴 cache reset (model changed) · next message ≈ $0.91 (40× more) · 228K / 1M · 🔄 Try /cmaxx-handoff to save 170K tokens | $0.85')
+  expect(v.text).toBe('🔴 cache reset (model changed) · next message ≈ $0.91 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 170K tokens | $0.85')
   expect(v.shouldPopup).toBe(false)
 })
 
@@ -110,7 +110,7 @@ test('compact: reset, usually small and orange', async () => {
 })
 
 test('times style hides dollars', async () => {
-  expect(decide(rec(), 72 * MIN, { ...DEFAULTS, costStyle: 'times' }).text).toBe('🔴 cache expired · next message: 40× more · 228K / 1M · 🔄 Try /cmaxx-handoff to save 170K tokens')
+  expect(decide(rec(), 72 * MIN, { ...DEFAULTS, costStyle: 'times' }).text).toBe('🔴 cache expired · next message: 40× more · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 170K tokens')
   expect(decide(rec({ prefix: 50_000 }), 10 * MIN, { ...DEFAULTS, costStyle: 'times' }).text).toBe('🟢 50:00 min left · next message: normal cost · 50K / 1M · ✅ Keep going')
 })
 
@@ -140,7 +140,7 @@ test('older chat filled in from session start: expired 2h ago, red', async () =>
   const now = 10 * 60 * MIN
   const r = fromSessionStart({ secondsSince: 7200, contextTokens: 290_000, model: 'claude-opus-5-5', window: 1_000_000 }, now, null, DEFAULTS)
   expect(r.isEstimate).toBe(true)
-  expect(decide(r, now, DEFAULTS).text).toBe('🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cmaxx-handoff to save 232K tokens | $2.21')
+  expect(decide(r, now, DEFAULTS).text).toBe('🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cache-monitor-handoff to save 232K tokens | $2.21')
 })
 
 test('older chat still warm (20 min ago): green with the right time', async () => {
@@ -212,7 +212,7 @@ test('stats: counts add up, junk counts as empty, the table puts this chat and a
   expect(t).toContain('| Cache hit rate | – | – |')
 })
 
-// --- 0.4.0: transcript fill-in, /cmaxx-update ----------------------------------------
+// --- 0.4.0: transcript fill-in, /cache-monitor-update ----------------------------------------
 const row = (o: object) => JSON.stringify(o)
 const asst = (id: string, at: string, read: number, write: number, extra: object = {}) =>
   row({ type: 'assistant', timestamp: at, message: { id, model: 'claude-opus-5-5', usage: { input_tokens: 2, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: 10 } }, ...extra })
@@ -261,9 +261,9 @@ test('a downloaded price table is refused unless it is sane and not older than t
   ]) expect('error' in validatePrices(bad, PRICES_DATE)).toBe(true)
 })
 
-test('an unknown model nudges to /cmaxx-update until a downloaded price covers it', () => {
+test('an unknown model nudges to /cache-monitor-update until a downloaded price covers it', () => {
   const r = rec({ model: 'claude-opus-6', prefix: 50_000 })
-  expect(decide(r, 10 * MIN, DEFAULTS).text).toBe('🟢 50:00 min left · next message: normal cost · 50K / 1M · ✅ Keep going · new model? try /cmaxx-update')
+  expect(decide(r, 10 * MIN, DEFAULTS).text).toBe('🟢 50:00 min left · next message: normal cost · 50K / 1M · ✅ Keep going · new model? try /cache-monitor-update')
   setPriceOverride({ 'opus-6': [5, 0.5] })
   try {
     expect(decide(r, 10 * MIN, DEFAULTS).text).toBe('🟢 50:00 min left · next message ≈ $0.03 · 50K / 1M · ✅ Keep going')
@@ -295,7 +295,7 @@ test('a tip with nothing to save falls back to the plain suggestion', () => {
   // a 30K chat under a $0.01 limit: 30K - 45K Haiku - 13K start is below zero
   const v = decide(rec({ prefix: 30_000, read: 30_000 }), 72 * MIN, { ...DEFAULTS, rebuildLimitUsd: 0.01 })
   expect(v.light).toBe('red')
-  expect(v.text.endsWith('🔄 Try /cmaxx-handoff or a new chat')).toBe(true)
+  expect(v.text.endsWith('🔄 Try /cache-monitor-handoff or a new chat')).toBe(true)
 })
 
 test('All chats: every chat summed with the retired ones; a chat with no reply or already retired is not counted again', () => {
@@ -312,9 +312,22 @@ test('handoffModel: aliases and full ids are priced; junk falls back to haiku', 
   expect(readSettings({}).handoffModel).toBe('haiku')
   expect(readSettings({ handoffModel: ' sonnet ' }).handoffModel).toBe('sonnet')
   expect(readSettings({ handoffModel: 'rm -rf /' }).handoffModel).toBe('haiku')
+  expect(readSettings({ handoffModel: 'custom', handoffModelCustom: 'claude-sonnet-5-5-20260401' }).handoffModel).toBe('claude-sonnet-5-5-20260401')
+  expect(readSettings({ handoffModel: 'custom', handoffModelCustom: '' }).handoffModel).toBe('haiku')
   expect(summaryUsd('haiku', 40_000, 5_000)).toBe(summaryUsd('claude-haiku-5-5', 40_000, 5_000))
   expect(summaryUsd('claude-sonnet-5-5', 1e6, 0)).toBe(2)
   expect(summaryUsd('some-unknown-model', 1, 1)).toBeNull()
   expect(modelLabel('claude-sonnet-5-5')).toBe('Sonnet')
   expect(modelLabel('opus')).toBe('Opus')
+})
+
+test('model typeahead: only on the handoff command\'s argument; aliases first, then priced ids', () => {
+  const all = modelChoices()
+  expect(all.slice(0, 4).map(c => c.text)).toEqual(['haiku', 'sonnet', 'opus', 'fable'])
+  expect(all.map(c => c.text)).toContain('claude-sonnet-5-5')
+  const cmd = '/cache-monitor-handoff '
+  expect(handoffModelSuggestions(cmd + 'son', cmd.length, 'son').map(c => c.text)).toEqual(['sonnet', 'claude-sonnet-5-5', 'claude-sonnet-5', 'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-sonnet-4'])
+  expect(handoffModelSuggestions('/cache-monitor-handoff haiku x', 29, 'x')).toEqual([]) // second word
+  expect(handoffModelSuggestions('/compact son', 9, 'son')).toEqual([])
+  expect(handoffModelSuggestions('/cache-monitor-model op', 21, 'op')[0]!.text).toBe('opus')
 })

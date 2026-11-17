@@ -23,7 +23,7 @@ git diff --quiet && git diff --cached --quiet || { echo "commit your changes fir
 grep -q "\"version\": \"$V\"" .claude-plugin/plugin.json || { echo "set \"version\": \"$V\" in .claude-plugin/plugin.json and commit first"; exit 1; }
 claude plugin validate . >/dev/null
 
-# /cmaxx-update reads prices.json from main: it must match the bundled table, and a price
+# /cache-monitor-update reads prices.json from main: it must match the bundled table, and a price
 # change needs a new date, or users who downloaded the old table keep it (it wins only if newer)
 bun scripts/prices-json.ts
 git diff --quiet prices.json || { echo "prices.json was out of date: commit the regenerated file first"; exit 1; }

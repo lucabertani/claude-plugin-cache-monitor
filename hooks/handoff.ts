@@ -1,4 +1,4 @@
-// /cmaxx-handoff: the pure parts. Code extracts the facts that must not be lost (files,
+// /cache-monitor-handoff: the pure parts. Code extracts the facts that must not be lost (files,
 // commits, the last request, the bar's numbers); Haiku writes the judgment sections from
 // an abbreviated conversation; a reply with none of the sections falls back to the facts.
 // Limits follow auto-handoff (battle-tested): last 120 messages, 2,000 chars each,

@@ -6,7 +6,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Rec } from '../types'
 import { assembleBrief, briefPrompt, extractFacts, handoffPath, isValidBrief, parseSkill, savingsLine, seedLine, transcriptGuess } from './handoff'
 import type { Numbers } from './handoff'
-import { PRICES_DATE, WAITING, isDevCopy, addStats, bundledPrices, costs, decide, fromSessionStart, handoffSaving, modelLabel, summaryUsd, newerVersion, priceOf, readSettings, sendWarning, setPriceOverride, statsFromTranscript, statsText, sumStats, ttlFor, validatePrices } from './logic'
+import { PRICES_DATE, WAITING, isDevCopy, addStats, bundledPrices, costs, decide, fromSessionStart, handoffSaving, handoffModelSuggestions, modelLabel, summaryUsd, validModel, newerVersion, priceOf, readSettings, sendWarning, setPriceOverride, statsFromTranscript, statsText, sumStats, ttlFor, validatePrices } from './logic'
 import type { Stats } from './logic'
 
 const KEEP_MS = 7 * 24 * 60 * 60 * 1000 // saved chats older than this are pruned; an older chat refills on resume
@@ -141,7 +141,7 @@ async function fillIn($: EngineInterface, sessionId: string, path: string | unde
   await $.store.set(key, { ...chat, at: now })
 }
 
-// Prices /cmaxx-update saved, checked again on load: a bad or stale table is ignored.
+// Prices /cache-monitor-update saved, checked again on load: a bad or stale table is ignored.
 async function loadPrices($: EngineInterface) {
   const v = validatePrices(await $.store.get('prices'), PRICES_DATE)
   // only a table newer than the bundled one: a release's corrected prices always win
@@ -155,8 +155,9 @@ export const register: Register = (on, options) => {
     isInteractive = e.isInteractive !== false
     // commands and ticker first: a broken store must never cost the user the bar or the commands
     await $.command.register({ name: 'cmaxx', description: 'Show or hide the cache-maxxing bar' })
-    await $.command.register({ name: 'cmaxx-handoff', description: 'Summarize this chat with a cheap model (Haiku by default, see the handoffModel option; the expired cache is never resent) and start a fresh chat from it' })
-    await $.command.register({ name: 'cmaxx-update', description: 'Update cache-maxxing to the latest version, or refresh its model prices (reads this plugin\'s GitHub files; sends nothing)' })
+    await $.command.register({ name: 'cache-monitor-handoff', description: 'Summarize this chat with a cheap model (Haiku by default, see the handoffModel option; the expired cache is never resent) and start a fresh chat from it', argumentHint: '[model: haiku | sonnet | opus | claude-…]' })
+    await $.command.register({ name: 'cache-monitor-model', description: 'Show or set the model /cache-monitor-handoff uses (a name from the list, or any model id)', argumentHint: '[haiku | sonnet | opus | claude-…]' })
+    await $.command.register({ name: 'cache-monitor-update', description: 'Update cache-maxxing to the latest version, or refresh its model prices (reads this plugin\'s GitHub files; sends nothing)' })
     await $.command.register({ name: 'cmaxx-stats', description: 'Show what cache-maxxing counted: handoff savings, cold rebuilds, cache hit rate, for this chat and all chats' })
     // Each second: redraw the bar (it computes from the wall clock, so sleep or a
     // paused timer can't drift it) and pop up once when a big chat's cache expires.
@@ -187,7 +188,7 @@ export const register: Register = (on, options) => {
     if (e.session_id) await fillIn($, e.session_id, e.transcript_path, ttlFor(settings.memoryMinutes), e.source === 'fork').catch(() => {})
     if (e.source === 'clear') {
       await save($, null, e.session_id)
-      // the fresh chat a /cmaxx-handoff opened: put the line in its box; sending stays the user's
+      // the fresh chat a /cache-monitor-handoff opened: put the line in its box; sending stays the user's
       const seed = pendingSeed
       pendingSeed = undefined
       if (seed && (await $.clock.now()) - seed.at < SEED_MS) {
@@ -303,10 +304,10 @@ export const register: Register = (on, options) => {
     return { text: isHidden ? 'cache-maxxing bar hidden. Type /cmaxx to show it.' : 'cache-maxxing bar shown.' }
   })
 
-  // /cmaxx-update: the plugin's only network use, and only when you run it. GETs of this
+  // /cache-monitor-update: the plugin's only network use, and only when you run it. GETs of this
   // repo's own files; nothing is sent. A newer version is installed by Claude Code's own
   // updater where the plugin may run it (the terminal); otherwise the reply says how.
-  on('command.run', { command: 'cmaxx-update' }, async $ => {
+  on('command.run', { command: 'cache-monitor-update' }, async $ => {
     const get = async (file: string) => {
       const r = await $.http.fetch(`${REPO_RAW}/${file}`)
       if (!r.ok) throw new Error(`${file}: HTTP ${r.status}`)
@@ -363,9 +364,13 @@ export const register: Register = (on, options) => {
     return { text: statsText(chat, all, settings) }
   })
 
-  // /cmaxx-handoff: Haiku writes the brief from the chat read locally. Never $.model.fork:
+  // /cache-monitor-handoff: Haiku writes the brief from the chat read locally. Never $.model.fork:
   // it would resend this chat's prefix, the very rebuild a handoff exists to avoid.
-  on('command.run', { command: 'cmaxx-handoff' }, async $ => {
+  on('command.run', { command: 'cache-monitor-handoff' }, async ($, e) => {
+    // `/cache-monitor-handoff sonnet` picks the model for this run; otherwise the handoffModel option
+    const args = e.args.trim()
+    const model = args ? validModel(args) : settings.handoffModel
+    if (!model) return { text: `cache-monitor: "${args.slice(0, 60)}" is not a model name (try haiku, sonnet, opus or a full id like claude-haiku-5-5). Nothing written.` }
     try {
       $.ui.toast('cache-maxxing: writing the handoff…')
       const skill = parseSkill(String(await $.fs.read(`${$.plugin.root}/hooks/handoff-skill.md`)))
@@ -375,9 +380,9 @@ export const register: Register = (on, options) => {
       const rec = await read($, last)
       const facts = extractFacts(messages)
       const nums: Numbers = rec ? { tokens: rec.prefix, window: rec.window, model: rec.model, bar: decide(rec, now, settings).text } : {}
-      const who = modelLabel(settings.handoffModel)
+      const who = modelLabel(model)
       const r = await $.model.complete({
-        model: settings.handoffModel,
+        model,
         system: skill.brief,
         prompt: briefPrompt(messages, facts, nums, skill.closing),
         effort: 'high',
@@ -396,7 +401,7 @@ export const register: Register = (on, options) => {
       if (!(await $.fs.stat(ignore).catch(() => undefined))) await $.fs.write(ignore, '*\n').catch(() => {})
       const line = seedLine(path)
       const c = rec && costs(rec)
-      const haiku = r.isAnswered ? { in: r.usage.input_tokens, out: r.usage.output_tokens, usd: summaryUsd(settings.handoffModel, r.usage.input_tokens, r.usage.output_tokens) ?? 0 } : null
+      const haiku = r.isAnswered ? { in: r.usage.input_tokens, out: r.usage.output_tokens, usd: summaryUsd(model, r.usage.input_tokens, r.usage.output_tokens) ?? 0 } : null
       const main = rec && c ? { model: rec.model, tokens: rec.prefix, cold: c.cold, isCold: ['red', 'orange'].includes(decide(rec, now, settings).light) } : null
       let text = savingsLine({ path, problem, haiku, main })
       // counted as the notice says it: a saving only when the cache had expired
@@ -425,6 +430,34 @@ export const register: Register = (on, options) => {
       return { text: `cache-maxxing: no handoff written (${String(err)}). This chat is untouched.` }
     }
   })
+
+  // /cache-monitor-model: a name from the settings picker is set there; any other id sets the
+  // picker to "custom" and the id in the free-text field. The change reloads the plugin with it.
+  on('command.run', { command: 'cache-monitor-model' }, async ($, e) => {
+    const arg = e.args.trim()
+    const key = `${$.plugin.name}.handoffModel`
+    const picker = (await $.config.list()).find(r => r.key === key)?.options ?? []
+    if (!arg) {
+      return { text: `Handoff model: ${settings.handoffModel}. Change it with /cache-monitor-model <model>, for example: ${picker.filter(o => o !== 'custom').join(', ')}, or any full model id. One run only: /cache-monitor-handoff <model>.` }
+    }
+    const model = validModel(arg)
+    if (!model) return { text: `"${arg.slice(0, 60)}" is not a model name. Nothing changed.` }
+    const isListed = picker.includes(model) && model !== 'custom'
+    if (!isListed) {
+      const c = await $.config.set({ key: `${$.plugin.name}.handoffModelCustom`, value: model })
+      if ('deny' in c && c.deny) return { text: `Couldn't set the model (${c.deny}). Nothing changed.` }
+    }
+    const p = await $.config.set({ key, value: isListed ? model : 'custom' })
+    if ('deny' in p && p.deny) return { text: `Couldn't set the model (${p.deny}). Nothing changed.` }
+    return { text: `Handoff model set to ${model}${isListed ? '' : ' (custom)'}. /cache-monitor-handoff uses it from now on.` }
+  })
+
+  // Typing "/cache-monitor-handoff s" or "/cache-monitor-model s" offers the models (sonnet, claude-sonnet-5-5, ...) to pick from.
+  on('prompt.autocomplete', async ($, e, next) => {
+    const r = await next(e)
+    const rows = handoffModelSuggestions(e.text, e.start, e.token)
+    return rows.length ? { suggestions: [...r.suggestions, ...rows] } : r
+  }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (await read($, hidden)) return next(e)
