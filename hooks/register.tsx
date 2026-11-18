@@ -4,9 +4,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Rec } from '../types'
-import { assembleBrief, briefPrompt, extractFacts, handoffPath, isValidBrief, parseSkill, savingsLine, seedLine, seedPath, transcriptGuess } from './handoff'
+import { assembleBrief, briefPrompt, extractFacts, handoffPath, isValidBrief, parseSkill, savingsLine, seedFile, seedLine, transcriptGuess } from './handoff'
 import type { Numbers } from './handoff'
-import { PRICES_DATE, WAITING, isDevCopy, addStats, bundledPrices, costs, decide, freshStart, fromSessionStart, handoffSaving, handoffModelSuggestions, hasCounts, isSilentReset, learnTtl, measureFirsts, modelLabel, setMeasured, speedFromTail, summaryUsd, systemLayer, validModel, newerVersion, priceOf, readSettings, sendWarning, setPriceOverride, statsFromTranscript, statsText, sumStats, ttlFor, validatePrices, writeRate } from './logic'
+import { PRICES_DATE, WAITING, isDevCopy, addStats, bundledPrices, costs, decide, freshStart, fromSessionStart, handoffSaving, handoffModelSuggestions, hasCounts, isSilentReset, learnTtl, measureFirsts, modelLabel, setMeasured, speedFromTail, summaryUsd, systemLayer, ttlFromEngine, validModel, newerVersion, priceOf, readSettings, sendWarning, setPriceOverride, statsFromTranscript, statsText, sumStats, ttlFor, validatePrices, writeRate } from './logic'
 import type { Settings, Stats } from './logic'
 
 const KEEP_MS = 7 * 24 * 60 * 60 * 1000 // saved chats older than this are pruned; an older chat refills on resume
@@ -24,11 +24,12 @@ const last = atom({ plugin: 'cache-monitor', key: 'last' } as const, null, { sha
 const tick = atom({ plugin: 'cache-monitor', key: 'tick' } as const, 0)
 // Closed with the bar's ✕ for this chat; /cache-monitor brings it back.
 const hidden = atom({ plugin: 'cache-monitor', key: 'hidden' } as const, false)
+// The transcript path from the latest SessionStart; in $.state so a plugin reload keeps it.
+const transcript = atom({ plugin: 'cache-monitor', key: 'transcript' } as const, null as string | null)
 
-// Module variables survive /clear ($.state does not): the handoff line waiting for the
-// fresh chat, and the transcript path from the latest SessionStart.
+// Module variables survive /clear ($.state does not): the handoff line waiting for the fresh chat.
 let pendingSeed: { line: string; at: number } | undefined
-let transcriptPath: string | undefined
+let isHandoffRunning = false // a second /cache-monitor-handoff queued meanwhile is refused
 
 // Clipboard first; if that fails too, a toast shows the line to copy by hand.
 async function copyOrSay($: EngineInterface, line: string) {
@@ -43,6 +44,8 @@ const CLEAR_RETRY_MS = [0, 500, 1_500, 3_000]
 async function clearThenSeed($: EngineInterface, line: string) {
   for (const wait of CLEAR_RETRY_MS) {
     if (wait) await $.clock.sleep(wait)
+    // the clear's SessionStart took the line (a late rejection must not clear the fresh chat too)
+    if (pendingSeed?.line !== line) return
     try {
       await $.command.run({ command: 'clear' })
       return // the clear SessionStart puts the line in the fresh chat's box
@@ -61,7 +64,9 @@ function isRec(v: unknown): v is Rec {
 
 async function save($: EngineInterface, rec: Rec | null, sessionId?: string) {
   await update($, last, () => rec)
-  // the store is only a backup: the bar runs from memory even when it can't be written
+  // the store is only a backup: the bar runs from memory even when it can't be written.
+  // claude -p and SDK runs keep none: nothing resumes them in a bar
+  if (!isInteractive) return
   const key = `cmx:${sessionId ?? (await $.session.id())}`
   await (rec ? $.store.set(key, rec) : $.store.delete(key)).catch(() => {})
 }
@@ -95,8 +100,16 @@ async function adopt($: EngineInterface, candidate: Rec | null, sessionId?: stri
 async function prune($: EngineInterface) {
   const now = await $.clock.now()
   const last = await $.store.get('prunedAt')
-  if (typeof last === 'number' && now - last < DAY_MS) return
-  await $.store.set('prunedAt', now)
+  // a prunedAt from a clock that ran ahead must not stop pruning until that date
+  if (typeof last === 'number' && last <= now && now - last < DAY_MS) return
+  // two processes starting together: each fold into st:retired (a read, then a write) is done only
+  // while this process's token still reads back. A full store refuses the writes: deleting goes
+  // on anyway, since freeing space is what it needs
+  const token = `${now}-${Math.random()}`
+  const isLeased = await $.store.set('pruneBy', token).then(() => true, () => false)
+  const isMine = async () => !isLeased || (await $.store.get('pruneBy')) === token
+  await $.store.set('prunedAt', now).catch(() => {})
+  const firsts: { total: number; read: number }[] = []
   for (const k of await $.store.keys()) {
     if (k.startsWith('cmx:')) {
       const r = await $.store.get(k)
@@ -106,7 +119,9 @@ async function prune($: EngineInterface) {
       if (typeof h?.at !== 'number' || now - h.at > KEEP_MS) await $.store.delete(k)
     } else if (k.startsWith('st:') && k !== 'st:retired' && k !== 'st:all') {
       const s = (await $.store.get(k)) as (Stats & { at?: number }) | undefined
+      if (s?.first && typeof s.first.total === 'number' && typeof s.first.read === 'number') firsts.push(s.first)
       if (typeof s?.at !== 'number') await $.store.delete(k)
+      else if (!hasCounts(s) && !s.retired && now - s.at > STATS_KEEP_MS) await $.store.delete(k) // never used: nothing to keep
       else if (s.retired && !hasCounts(s)) {
         if (now - s.at > TOMBSTONE_MS) {
           await $.store.delete(k)
@@ -116,27 +131,33 @@ async function prune($: EngineInterface) {
         }
       } else if (now - s.at > STATS_KEEP_MS) {
         const id = `${k}@${s.at}`
+        if (!(await isMine())) return
         const r = (await $.store.get('st:retired')) as Stats | undefined
         if (r?.folded?.[id] === undefined) {
           const x = addStats(s, {}, now)
           const sum = addStats(r, { ...x, chats: x.replies > 0 && !s.retired ? 1 : 0 }, now)
           await $.store.set('st:retired', { ...sum, first: undefined, folded: { ...r?.folded, [id]: now } })
         }
-        await $.store.set(k, { at: s.at, since: now, isFilled: true, retired: true, ...(s.first ? { first: s.first } : {}) })
+        // a reply counted meanwhile (this chat resumed while pruning) keeps its record; the next
+        // prune folds the rest, and the folded id no longer matches, so nothing counts twice
+        const again = (await $.store.get(k)) as (Stats & { at?: number }) | undefined
+        if (again?.at !== s.at) continue
+        // partialSince: a resumed retired chat's own column says it counts from then
+        await $.store.set(k, { at: s.at, since: now, partialSince: now, isFilled: true, retired: true, ...(s.first ? { first: s.first } : {}) })
       }
     }
   }
+  // what a fresh chat costs, from your own chats' first requests: kept for every session start
+  const m = measureFirsts(firsts)
+  setMeasured(m)
+  await $.store.set('measured', m).catch(() => {})
 }
 
-// What a fresh chat costs, from the first requests of your own chats (st:<chat>.first).
-async function measure($: EngineInterface) {
-  const firsts: { total: number; read: number }[] = []
-  for (const k of await $.store.keys()) {
-    if (!k.startsWith('st:') || k === 'st:retired' || k === 'st:all') continue
-    const f = ((await $.store.get(k)) as Stats | undefined)?.first
-    if (f && typeof f.total === 'number' && typeof f.read === 'number') firsts.push(f)
-  }
-  setMeasured(measureFirsts(firsts))
+// The figures the last prune measured (one store read at start, not one per chat).
+async function loadMeasured($: EngineInterface) {
+  const m = (await $.store.get('measured')) as { fresh?: unknown; system?: unknown } | undefined
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined)
+  if (m && typeof m === 'object') setMeasured({ fresh: n(m.fresh), system: n(m.system) })
 }
 
 // /cache-monitor-stats counters, per chat. A turn's counts wait in memory and are written once, at the
@@ -151,14 +172,19 @@ async function count($: EngineInterface, d: Partial<Stats>, sessionId?: string) 
   pending.set(key, addStats(pending.get(key), d, 0))
 }
 
-// A write that fails puts its counts back, so the next flush tries them again.
+// A write that fails puts its counts back, so the next flush tries them again. It waits for a
+// prune in progress, so a fold and a write of the same chat never interleave.
+let pruning: Promise<unknown> = Promise.resolve()
 async function flush($: EngineInterface) {
+  await pruning.catch(() => {})
   const now = await $.clock.now()
   let error: unknown
   for (const [key, d] of [...pending]) {
     pending.delete(key) // counts arriving during the write start a fresh entry
     try {
-      await $.store.set(key, { ...addStats(await $.store.get(key), d, now), at: now })
+      // a chat counted live from its start never needs its transcript read
+      const filled = liveChats.has(key) ? { isFilled: true } : {}
+      await $.store.set(key, { ...addStats(await $.store.get(key), d, now), ...filled, at: now })
     } catch (err) {
       pending.set(key, addStats(d, pending.get(key) ?? {}, 0))
       error = err
@@ -167,8 +193,10 @@ async function flush($: EngineInterface) {
   if (error) throw error
 }
 
-// Chats this process saw start with no transcript: their first reply is a fresh chat's first request.
+// Chats this process saw start with no transcript: their first reply is a fresh chat's first
+// request (newChats, by id), and they are counted live from it (liveChats, by st: key).
 const newChats = new Set<string>()
+const liveChats = new Set<string>()
 
 // A chat this plugin hasn't counted from its start: read its history from the transcript once
 // (4 MiB at most, $.fs.read's limit), adding only what live counting hasn't already. Too big to
@@ -182,16 +210,27 @@ async function fillIn($: EngineInterface, sessionId: string, path: string | unde
   // a fork's transcript copies its parent's rows: count it from its first reply instead
   if (isFork) return void (await $.store.set(key, { ...addStats(have, {}, now), isFilled: true, at: now }))
   const file = await $.fs.stat(path).catch(() => undefined)
-  // nothing on disk yet (a new chat): counted live from its first reply, never read back later
+  // nothing on disk yet (a new chat): counted live from its first reply, never read back later.
+  // No record until that reply: an empty chat leaves nothing in the store
   if (!file) {
     newChats.add(sessionId)
-    return void (await $.store.set(key, { ...addStats(have, {}, now), isFilled: true, at: now }))
+    liveChats.add(key)
+    return
   }
   const isTooBig = (file.size ?? 0) > MAX_READ
   // the transcript holds everything counted live so far, so it replaces those counts
-  const chat = isTooBig
+  // the savings counted live (a handoff's line sent later) are not in the transcript: kept
+  const read = isTooBig ? null : addStats(null, statsFromTranscript(String(await $.fs.read(path)), ttlMin, setting), now)
+  const chat = !read
     ? { ...addStats(have, {}, now), partialSince: have?.since ?? now }
-    : { ...addStats(null, statsFromTranscript(String(await $.fs.read(path)), ttlMin, setting), now), isFilled: true }
+    : {
+        ...read,
+        savedTokens: Math.max(read.savedTokens, Number(have?.savedTokens) || 0),
+        savedUsd: Math.max(read.savedUsd, Number(have?.savedUsd) || 0),
+        ...(have?.first && !read.first ? { first: have.first } : {}),
+        since: Math.min(read.since, Number(have?.since) || read.since),
+        isFilled: true,
+      }
   await $.store.set(key, { ...chat, at: now })
 }
 
@@ -204,24 +243,134 @@ async function loadPrices($: EngineInterface) {
 
 // The newest main-chat reply's speed, from the transcript's tail; undefined when unknown.
 async function lastSpeed($: EngineInterface): Promise<boolean | undefined> {
-  if (!transcriptPath) return undefined
+  const path = await read($, transcript)
+  if (!path) return undefined
   try {
-    const size = (await $.fs.stat(transcriptPath))?.size ?? 0
+    const size = (await $.fs.stat(path))?.size ?? 0
     const offset = Math.max(0, size - TAIL_BYTES)
-    return speedFromTail(String(await $.fs.read(transcriptPath, { offset, length: TAIL_BYTES })))
+    return speedFromTail(String(await $.fs.read(path, { offset, length: TAIL_BYTES })))
   } catch {
     return undefined
   }
 }
 
-// Counts a handoff's saving once, to the chat it came from, when its line is sent.
-async function creditHandoff($: EngineInterface, path: string) {
-  const key = `ho:${path}`
-  const h = (await $.store.get(key)) as { from?: string; savedTokens?: number; savedUsd?: number } | undefined
-  if (!h || typeof h.from !== 'string') return
-  await $.store.delete(key)
-  await count($, { savedTokens: Number(h.savedTokens) || 0, savedUsd: Number(h.savedUsd) || 0 }, h.from)
+// Counts a handoff's saving once, to the chat it came from, when one of its lines is sent in
+// another chat. One key per old chat (ho:<chat>): handoffs run twice save one rebuild, not two.
+async function creditHandoff($: EngineInterface, file: string) {
+  const here = await $.session.id()
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith('ho:')) continue
+    const h = (await $.store.get(key)) as { from?: string; files?: unknown; savedTokens?: number; savedUsd?: number } | undefined
+    if (!h || typeof h.from !== 'string' || !Array.isArray(h.files) || !h.files.includes(file)) continue
+    if (h.from === here) return // pasted into the old chat: that message pays the rebuild itself
+    await count($, { savedTokens: Number(h.savedTokens) || 0, savedUsd: Number(h.savedUsd) || 0 }, h.from)
+    await $.store.delete(key)
+    return
+  }
 }
+
+// The turn's rows are in the transcript by now: correct the speed a step read too early.
+async function recheckSpeed($: EngineInterface) {
+  const fast = await lastSpeed($)
+  const rec = await read($, last)
+  if (fast !== undefined && rec && !!rec.fast !== fast) {
+    const at = rec.at
+    await update($, last, x => (x && x.at === at ? { ...x, fast } : x))
+    const now = await read($, last)
+    if (now && now.at === at && isInteractive) await $.store.set(`cmx:${await $.session.id()}`, now).catch(() => {})
+  }
+}
+
+
+// /cache-monitor-handoff's work, once the model is known and no other run is going.
+async function runHandoff($: EngineInterface, model: string, settings: Settings): Promise<{ text?: string }> {
+  let path: string
+  let text: string
+  let line: string
+  try {
+    $.ui.toast('cache-monitor: writing the handoff…')
+    const skill = parseSkill(String(await $.fs.read(`${$.plugin.root}/hooks/handoff-skill.md`)))
+    const messages = await $.session.messages()
+    const sessionId = await $.session.id()
+    const cwd = await $.session.cwd()
+    const now = await $.clock.now()
+    const rec = await read($, last)
+    const facts = extractFacts(messages)
+    const nums: Numbers = rec ? { tokens: rec.prefix, window: rec.window, model: rec.model, bar: decide(rec, now, settings).text } : {}
+    const who = modelLabel(model)
+    const r = await $.model.complete({
+      model,
+      system: skill.brief,
+      prompt: briefPrompt(messages, facts, nums, skill.closing),
+      effort: 'high',
+      // the API's ceiling, not a budget. shortcut: no output cap yet; set one from a few real briefs
+      maxTokens: 64_000,
+      timeoutMs: 180_000, // your call: a slow API gets 3 minutes, then the facts-only file
+    })
+    const usable = r.isAnswered && r.text.trim() && isValidBrief(r.text, skill.brief) ? r.text : undefined
+    const transcriptPath = (await read($, transcript)) ?? transcriptGuess(cwd, sessionId)
+    path = handoffPath(now, sessionId)
+    const ignore = '.claude/handoffs/.gitignore'
+    // briefs quote the chat: the folder ignores itself so `git add -A` never picks them up
+    const writeFile = async (brief: string | undefined) => {
+      await $.fs.write(path, assembleBrief({ sessionId, transcript: transcriptPath, skill, writer: who }, facts, nums, brief))
+      if (!(await $.fs.stat(ignore).catch(() => undefined))) await $.fs.write(ignore, '*\n').catch(() => {})
+    }
+    if (!usable) {
+      // a returned failure or a brief without the last request and next steps: like a thrown
+      // error, nothing is cleared or counted. The facts are still kept, to use by hand if wanted.
+      // Haiku's token counts: out at the cap means it ran out of room.
+      const why = !r.isAnswered ? `${who} ${r.reason}` : `${who}'s reply ${r.text.trim() ? 'lacked "Last Request from the User" or "Next Steps"' : 'had no text'}, in ${r.usage.input_tokens} / out ${r.usage.output_tokens} of 64000 tokens`
+      const kept = await writeFile(undefined).then(() => ` The facts extracted in code are in ${path}, if you want them.`, () => '')
+      return { text: `cache-monitor: no handoff (${why}). This chat is untouched.${kept}` }
+    }
+    await writeFile(usable)
+    line = seedLine(cwd, path)
+    const c = rec && costs(rec)
+    // an unpriced summary model: no dollar figure is claimed or counted
+    const usd = summaryUsd(model, r.usage.input_tokens, r.usage.output_tokens)
+    const haiku = { in: r.usage.input_tokens, out: r.usage.output_tokens, usd }
+    const fresh = freshStart(settings)
+    const main = rec && c ? { model: rec.model, tokens: rec.prefix, cold: c.cold, isCold: ['red', 'orange'].includes(decide(rec, now, settings).light), fresh } : null
+    text = savingsLine({ path, haiku, main })
+    // the saving waits until the new chat is used (its line sent there), as the notice says it:
+    // one key per old chat, so a handoff run twice saves its one rebuild once
+    const saved = main?.isCold && usd !== null ? handoffSaving(main.tokens, main.cold, { ...haiku, usd }, fresh) : null
+    const file = path.split('/').pop()!
+    if (saved?.isWorth) {
+      const before = (await $.store.get(`ho:${sessionId}`).catch(() => undefined)) as { files?: unknown } | undefined
+      const files = [...(Array.isArray(before?.files) ? before.files : []), file].slice(-10)
+      await $.store.set(`ho:${sessionId}`, { at: now, from: sessionId, files, savedTokens: saved.tokens, savedUsd: saved.usd }).catch(() => {})
+    }
+    await count($, { handoffs: 1 }, sessionId).catch(() => {})
+    await flush($).catch(() => {}) // the old chat is about to be cleared: keep its handoff now
+  } catch (err) {
+    return { text: `cache-monitor: no handoff written (${String(err)}). This chat is untouched.` }
+  }
+  // the file is written: from here a failure still hands over the line, never "untouched"
+  try {
+    if ((await $.session.surfaces()).includes('desktop')) {
+      // desktop reuses the tab on /clear, so the old chat drops out of view, and its own
+      // composer refuses a fill (live 00:12, F52): there the old chat stays put
+      const c = await $.ui.copy({ text: line }).catch(() => ({ isCopied: false }))
+      text += ` To continue, start a new chat and paste${c.isCopied ? ' (auto-copied)' : ''}: ${line}`
+      $.ui.toast(text)
+      // the desktop app doesn't draw a system notice row (live 00:31, F53): use the command's output
+      return { text }
+    }
+    pendingSeed = { line, at: await $.clock.now() } // after Haiku: the call itself may take minutes
+    // /clear is refused from inside this hook (measured), so it starts on a timer just
+    // after the command returns; the clear SessionStart above puts the line in the new chat's box
+    $.clock.after(0, () => void clearThenSeed($, line))
+    // a notice row kept in this chat's transcript (the model never reads it), so the line is
+    // there whenever the user comes back; command output went unseen after the clear (00:01)
+    const kept = await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } }).catch(() => ({ deny: 'error' }))
+    return kept.deny ? { text } : {}
+  } catch {
+    return { text: `${text} To continue, start a new chat and send: ${line}` }
+  }
+}
+
 
 export const register: Register = (on, options) => {
   const settings = readSettings(options as Record<string, unknown>)
@@ -251,7 +400,8 @@ export const register: Register = (on, options) => {
       })().catch(() => {})
     })
     // in the background: never holds up the first prompt
-    void prune($).catch(() => {}).then(() => measure($)).catch(() => {})
+    await loadMeasured($).catch(() => {})
+    pruning = prune($).catch(() => {})
     await loadPrices($).catch(() => {})
     await adopt($, null).catch(() => {}) // bring back this chat's saved record (app restart, reload)
     return next(e)
@@ -260,7 +410,7 @@ export const register: Register = (on, options) => {
   // Older chats and chats resumed inside a running app: Claude Code says how long
   // ago the last reply was and how big the chat is, so the bar can show at once.
   on('classic.SessionStart', async ($, e, next) => {
-    if (e.transcript_path) transcriptPath = e.transcript_path
+    if (e.transcript_path) await update($, transcript, () => e.transcript_path!)
     if (e.session_id) await fillIn($, e.session_id, e.transcript_path, ttlFor(settings.memoryMinutes), e.source === 'fork', settings.memoryMinutes).catch(() => {})
     if (e.source === 'clear') {
       await save($, null, e.session_id)
@@ -281,6 +431,7 @@ export const register: Register = (on, options) => {
         contextTokens: e.context_tokens,
         model: e.model ?? (await $.session.model()),
         window: (await $.session.usage()).context.window || undefined,
+        likelyExpired: e.prompt_cache_likely_expired,
       }, now, prev, settings)
       await adopt($, candidate, e.session_id)
     } else {
@@ -296,25 +447,32 @@ export const register: Register = (on, options) => {
       const u = r.usage
       const prev = await read($, last)
       const prompt = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
-      // the lifetime this reply's write used; fast mode from the transcript (lags a step at most)
+      // the lifetime this reply's write used; fast mode from the transcript (lags a step at most,
+      // corrected at the turn's end)
       const ttlMin = learnTtl(settings.memoryMinutes, u, prev?.ttlMin)
       const fast = (await lastSpeed($)) ?? prev?.fast ?? false
+      const usage = await $.session.usage()
+      // a step where the API ran tools of its own sums every iteration: the chat's size is the
+      // engine's figure for the last one
+      const looped = r.serverToolUses?.length && usage.context.tokens ? usage.context.tokens : undefined
       await save($, {
         at: startedAt,
-        prefix: prompt + u.output_tokens,
+        prefix: looped ?? prompt + u.output_tokens,
         out: u.output_tokens,
         model: u.model,
+        replyModel: u.model,
         read: u.cache_read_input_tokens,
         write: u.cache_creation_input_tokens,
         ttlMin,
         miss5: 0,
         warned: false,
-        window: (await $.session.usage()).context.window || prev?.window,
+        window: usage.context.window || prev?.window,
         ...(fast ? { fast: true } : {}),
       })
-      // a reply sent after this chat's cache expired or was reset paid for a rebuild: its cache write.
-      // So did one that read far less than the chat held (a reset with no event of its own).
-      const isRebuild = !!prev && (!!prev.resetBy || startedAt > prev.at + prev.ttlMin * 60_000 || isSilentReset(prev, u))
+      // a rebuild is a reply that read far less than the chat held: after expiry, a model switch,
+      // or a reset with no event of its own (a switch back to a model still cached reads it all).
+      // A compaction always rebuilds its new, shorter history.
+      const isRebuild = !!prev && (prev.resetBy === 'compact' || isSilentReset(prev, u))
       const p = priceOf(u.model, prompt, fast)
       const writeUsd = p ? (u.cache_creation_input_tokens * writeRate(p.input, ttlMin)) / 1e6 : 0
       const sessionId = await $.session.id()
@@ -331,15 +489,20 @@ export const register: Register = (on, options) => {
 
   // A real model switch drops the cache at once: re-price on the new model now.
   // `resume` only restores the chat's own model, so its cache is untouched.
+  // Back to the model of the last reply while its cache lives (A → B → A): no reset. The cache
+  // belongs to one model, so nothing a compaction kept stays cached. The engine says the TTL.
   on('classic.PostModelSwitch', async ($, e, next) => {
     const prev = await read($, last)
     if (prev && e.source !== 'resume' && e.from_model !== e.to_model) {
+      const isBack = !!prev.replyModel && e.to_model === prev.replyModel && prev.resetBy !== 'compact'
+      const { resetBy: _r, cached: _c, ...rest } = prev
       await save($, {
-        ...prev,
+        ...rest,
         model: e.to_model,
         prefix: e.context_tokens || prev.prefix,
+        ttlMin: ttlFromEngine(settings.memoryMinutes, e.cache_ttl, prev.ttlMin),
         window: (await $.session.usage()).context.window || prev.window,
-        resetBy: 'model',
+        ...(isBack ? {} : { resetBy: 'model' as const }),
         warned: false,
       })
     }
@@ -355,7 +518,7 @@ export const register: Register = (on, options) => {
       // estimate when the engine has no figure yet (none, or 0): summary at ~4 chars/token plus the system part
       const prefix = measured || Math.round(e.compact_summary.length / 4) + systemLayer()
       // the system prompt layer stays cached through a compaction; the rest is written again
-      await save($, { ...prev, prefix, out: 0, cached: Math.min(systemLayer(), prefix), resetBy: 'compact', warned: false })
+      await save($, { ...prev, prefix, out: 0, cached: Math.min(systemLayer(), prefix), resetBy: 'compact', replyModel: undefined, warned: false })
     }
     return next(e)
   }).catch(($, e, next) => next(e)) // fail open: never get in Claude Code's way
@@ -367,8 +530,8 @@ export const register: Register = (on, options) => {
       const rec = await read($, last)
       if (rec && decide(rec, await $.clock.now(), settings).light === 'red') $.ui.toast(sendWarning(rec))
     }
-    const path = !e.command ? seedPath(e.text) : undefined
-    if (path) await creditHandoff($, path).catch(() => {})
+    const file = !e.command ? seedFile(e.text) : undefined
+    if (file) await creditHandoff($, file).catch(() => {})
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -381,9 +544,10 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // a turn's /cache-monitor-stats counts are written once, when it ends
+  // a turn's /cache-monitor-stats counts are written once, when it ends; and its speed rechecked
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    await recheckSpeed($).catch(() => {})
     await flush($).catch(() => {})
     return r
   })
@@ -421,21 +585,23 @@ export const register: Register = (on, options) => {
       lines.push(`Couldn't check for a new version (${String(err).slice(0, 200)}).`)
     }
     try {
-      const v = validatePrices(await get('prices.json'), PRICES_DATE)
+      const v = validatePrices(await get('prices.json'), PRICES_DATE, await $.clock.now())
+      const stored = validatePrices(await $.store.get('prices').catch(() => undefined), PRICES_DATE)
       if ('error' in v) lines.push(`Prices not changed: the downloaded table was refused (${v.error}).`)
+      else if (!('error' in stored) && v.sourceDate < stored.sourceDate) lines.push(`Prices not changed: the download (${v.sourceDate}) is older than the saved table (${stored.sourceDate}).`)
       else if (v.sourceDate <= PRICES_DATE) {
         // not newer than the prices built into this version: those win, and an older download is dropped
         await $.store.delete('prices').catch(() => {})
         setPriceOverride(null)
         lines.push(`Prices: up to date (${PRICES_DATE}).`)
       } else {
-        const before = validatePrices(await $.store.get('prices').catch(() => undefined), PRICES_DATE)
-        const known = 'error' in before || before.sourceDate <= PRICES_DATE ? bundledPrices().prices : before.prices
+        const known = 'error' in stored || stored.sourceDate <= PRICES_DATE ? bundledPrices().prices : stored.prices
         const added = Object.keys(v.prices).filter(k => !(k in known))
         const changed = added.length > 0 || JSON.stringify(v.prices) !== JSON.stringify(known)
-        await $.store.set('prices', v).catch(() => {})
+        const isSaved = await $.store.set('prices', v).then(() => true, () => false)
         setPriceOverride(v.prices)
-        lines.push(changed ? `Prices updated to ${v.sourceDate}${added.length ? `: new ${added.map(k => `claude-${k}`).join(', ')}` : ''}.` : `Prices: up to date (${v.sourceDate}).`)
+        const kept = isSaved ? '' : ' (for this session only: they could not be saved)'
+        lines.push(changed ? `Prices updated to ${v.sourceDate}${added.length ? `: new ${added.map(k => `claude-${k}`).join(', ')}` : ''}${kept}.` : `Prices: up to date (${v.sourceDate}).`)
       }
     } catch (err) {
       lines.push(`Prices not checked (${String(err).slice(0, 200)}).`)
@@ -461,75 +627,13 @@ export const register: Register = (on, options) => {
     const args = e.args.trim()
     const model = args ? validModel(args) : settings.handoffModel
     if (!model) return { text: `cache-monitor: "${args.slice(0, 60)}" is not a model name (try haiku, sonnet, opus or a full id like claude-haiku-5-5). Nothing written.` }
+    // a second run queued while the first waits on the model would clear twice and pay twice
+    if (isHandoffRunning) return { text: 'cache-monitor: a handoff is already being written. Nothing done.' }
+    isHandoffRunning = true
     try {
-      $.ui.toast('cache-monitor: writing the handoff…')
-      const skill = parseSkill(String(await $.fs.read(`${$.plugin.root}/hooks/handoff-skill.md`)))
-      const messages = await $.session.messages()
-      const sessionId = await $.session.id()
-      const now = await $.clock.now()
-      const rec = await read($, last)
-      const facts = extractFacts(messages)
-      const nums: Numbers = rec ? { tokens: rec.prefix, window: rec.window, model: rec.model, bar: decide(rec, now, settings).text } : {}
-      const who = modelLabel(model)
-      const r = await $.model.complete({
-        model,
-        system: skill.brief,
-        prompt: briefPrompt(messages, facts, nums, skill.closing),
-        effort: 'high',
-        // the API's ceiling, not a budget. shortcut: no output cap yet; set one from a few real briefs
-        maxTokens: 64_000,
-        timeoutMs: 180_000, // your call: a slow API gets 3 minutes, then the facts-only file
-      })
-      const usable = r.isAnswered && r.text.trim() && isValidBrief(r.text, skill.brief) ? r.text : undefined
-      const transcript = transcriptPath ?? transcriptGuess(await $.session.cwd(), sessionId)
-      const path = handoffPath(now, sessionId)
-      const ignore = '.claude/handoffs/.gitignore'
-      // briefs quote the chat: the folder ignores itself so `git add -A` never picks them up
-      const writeFile = async (brief: string | undefined) => {
-        await $.fs.write(path, assembleBrief({ sessionId, transcript, skill, writer: who }, facts, nums, brief))
-        if (!(await $.fs.stat(ignore).catch(() => undefined))) await $.fs.write(ignore, '*\n').catch(() => {})
-      }
-      if (!usable) {
-        // a returned failure or a brief without the last request and next steps: like a thrown
-        // error, nothing is cleared or counted. The facts are still kept, to use by hand if wanted.
-        // Haiku's token counts: out at the cap means it ran out of room.
-        const why = !r.isAnswered ? `${who} ${r.reason}` : `${who}'s reply ${r.text.trim() ? 'lacked "Last Request from the User" or "Next Steps"' : 'had no text'}, in ${r.usage.input_tokens} / out ${r.usage.output_tokens} of 64000 tokens`
-        const kept = await writeFile(undefined).then(() => ` The facts extracted in code are in ${path}, if you want them.`, () => '')
-        return { text: `cache-monitor: no handoff (${why}). This chat is untouched.${kept}` }
-      }
-      await writeFile(usable)
-      const line = seedLine(path)
-      const c = rec && costs(rec)
-      const haiku = { in: r.usage.input_tokens, out: r.usage.output_tokens, usd: summaryUsd(model, r.usage.input_tokens, r.usage.output_tokens) ?? 0 }
-      const fresh = freshStart(settings)
-      const main = rec && c ? { model: rec.model, tokens: rec.prefix, cold: c.cold, isCold: ['red', 'orange'].includes(decide(rec, now, settings).light), fresh } : null
-      let text = savingsLine({ path, haiku, main })
-      // the saving waits until the new chat is used (its line sent), so a handoff run twice or never
-      // used is not counted; only when the cache had expired, as the notice says it
-      const saved = main?.isCold ? handoffSaving(main.tokens, main.cold, haiku, fresh) : null
-      if (saved) await $.store.set(`ho:${path}`, { at: now, from: sessionId, savedTokens: saved.tokens, savedUsd: saved.usd }).catch(() => {})
-      await count($, { handoffs: 1 }, sessionId).catch(() => {})
-      await flush($).catch(() => {}) // the old chat is about to be cleared: keep its handoff now
-      if ((await $.session.surfaces()).includes('desktop')) {
-        // desktop reuses the tab on /clear, so the old chat drops out of view, and its own
-        // composer refuses a fill (live 00:12, F52): there the old chat stays put
-        const c = await $.ui.copy({ text: line }).catch(() => ({ isCopied: false }))
-        text += ` To continue, start a new chat and paste${c.isCopied ? ' (auto-copied)' : ''}: ${line}`
-        $.ui.toast(text)
-        // the desktop app doesn't draw a system notice row (live 00:31, F53): use the command's output
-        return { text }
-      } else {
-        pendingSeed = { line, at: await $.clock.now() } // after Haiku: the call itself may take minutes
-        // /clear is refused from inside this hook (measured), so it starts on a timer just
-        // after the command returns; the clear SessionStart above puts the line in the new chat's box
-        $.clock.after(0, () => void clearThenSeed($, line))
-      }
-      // a notice row kept in this chat's transcript (the model never reads it), so the line is
-      // there whenever the user comes back; command output went unseen after the clear (00:01)
-      const kept = await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } }).catch(() => ({ deny: 'error' }))
-      return kept.deny ? { text } : {}
-    } catch (err) {
-      return { text: `cache-monitor: no handoff written (${String(err)}). This chat is untouched.` }
+      return await runHandoff($, model, settings)
+    } finally {
+      isHandoffRunning = false
     }
   })
 
@@ -542,8 +646,10 @@ export const register: Register = (on, options) => {
     if (!arg) {
       return { text: `Handoff model: ${settings.handoffModel}. Change it with /cache-monitor-model <model>, for example: ${picker.filter(o => o !== 'custom').join(', ')}, or any full model id. One run only: /cache-monitor-handoff <model>.` }
     }
-    const model = validModel(arg)
-    if (!model) return { text: `"${arg.slice(0, 60)}" is not a model name. Nothing changed.` }
+    const typed = validModel(arg)
+    if (!typed || typed.toLowerCase() === 'custom') return { text: `"${arg.slice(0, 60)}" is not a model name. Nothing changed.` }
+    // "Haiku" is the listed haiku, not a custom id the API would refuse
+    const model = picker.find(o => o.toLowerCase() === typed.toLowerCase() && o !== 'custom') ?? typed
     const isListed = picker.includes(model) && model !== 'custom'
     if (!isListed) {
       const c = await $.config.set({ key: `${$.plugin.name}.handoffModelCustom`, value: model })

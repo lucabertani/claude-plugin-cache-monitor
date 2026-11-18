@@ -15,10 +15,11 @@ export type Rec = {
   isEstimate?: boolean // filled in from session-start data, not from a reply this plugin saw
   fast?: boolean // the last reply came at fast-mode speed (2x prices, a cache of its own)
   cached?: number // tokens still cached after a reset (the system prompt layer a compaction keeps)
+  replyModel?: string // the model of the last real reply: switching back to it while its cache lives is no reset
 }
 
 declare module 'claude-code' {
   interface PluginState {
-    'cache-monitor': { last: Shaped<Rec | null>; tick: number; hidden: boolean }
+    'cache-monitor': { last: Shaped<Rec | null>; tick: number; hidden: boolean; transcript: string | null }
   }
 }

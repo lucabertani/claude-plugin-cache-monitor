@@ -412,3 +412,21 @@ test('compact keeps the system layer cached: only the rest is written', () => {
   // 30K: 20K read at $0.20/M + 10K written at $8/M
   expect(Math.abs(costs(rec({ prefix: 30_000, cached: 20_000 }))!.cold - 0.084) < 1e-9).toBe(true)
 })
+
+
+test('prices: a table dated more than a week ahead is refused', () => {
+  const now = Date.UTC(2026, 10, 18)
+  expect('error' in validatePrices({ sourceDate: '2062-11-17', prices: { 'opus-6': [5, 0.5] } }, PRICES_DATE, now)).toBe(true)
+  expect('error' in validatePrices({ sourceDate: '2026-11-20', prices: { 'opus-6': [5, 0.5] } }, PRICES_DATE, now)).toBe(false)
+})
+
+test('the clock shows 60:00 for a full hour, and never more than the lifetime', () => {
+  expect(clock(60 * MIN)).toBe('60:00')
+  expect(clock(61 * MIN)).toBe('1:01:00')
+  expect(decide(rec({ at: 30 * MIN }), 0, DEFAULTS).text.startsWith('🟢 60:00 min left')).toBe(true) // a record from the "future"
+})
+
+test('one rule for "worth it": tokens and dollars both above zero', () => {
+  expect(handoffSaving(80_000, 0.64, { in: 40_000, out: 5_000, usd: 0.0065 }).isWorth).toBe(false) // 41K beyond the start, minus 45K
+  expect(handoffSaving(228_000, 1.824, { in: 40_000, out: 5_000, usd: 0.0065 }).isWorth).toBe(true)
+})

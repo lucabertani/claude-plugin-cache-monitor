@@ -118,12 +118,18 @@ export function ttlFor(setting: Settings['memoryMinutes']): number {
 
 // `auto`: the lifetime the reply's own cache write used (usage.cache_creation's ephemeral_1h /
 // ephemeral_5m); a reply that wrote nothing keeps what was known, since a read keeps the entry's TTL.
-export function learnTtl(setting: Settings['memoryMinutes'], u: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number }, known?: number): number {
+// A write with no split at all (a provider that reports none) is 5 minutes, as /cost prices it.
+export function learnTtl(setting: Settings['memoryMinutes'], u: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number; cache_creation_input_tokens?: number }, known?: number): number {
   if (setting !== 'auto') return Number(setting)
   if ((u.ephemeral_1h_input_tokens ?? 0) > 0) return 60
   if ((u.ephemeral_5m_input_tokens ?? 0) > 0) return 5
+  if ((u.cache_creation_input_tokens ?? 0) > 0 && u.ephemeral_1h_input_tokens === undefined && u.ephemeral_5m_input_tokens === undefined) return 5
   return known ?? 60
 }
+
+// The engine's own TTL word ('5m' | '1h', as PostModelSwitch says it) in minutes.
+export const ttlFromEngine = (setting: Settings['memoryMinutes'], ttl: unknown, known: number) =>
+  setting !== 'auto' ? Number(setting) : ttl === '5m' ? 5 : ttl === '1h' ? 60 : known
 
 // A reply that read far less than the chat held, while the cache should have been alive:
 // something reset it (fast mode toggled, effort or tools changed, old images dropped, a skill's model).
@@ -221,12 +227,12 @@ export function measureFirsts(firsts: { total: number; read: number }[]): { fres
 // The one saving calculation, for the bar (Haiku estimated) and the handoff's notice (Haiku measured):
 // the rebuild beyond a fresh chat's own start and the brief, minus what Haiku read, wrote and cost.
 // Negative when a fresh chat costs about as much as the rebuild: the handoff then saves nothing.
+// isWorth: the one rule the bar, the notice and the stats all use (both figures above zero).
 export function handoffSaving(prefix: number, cold: number, haiku: { in: number; out: number; usd: number } | null, fresh = FRESH_START_DEFAULT) {
   const beyond = prefix - fresh - BRIEF_TOKENS
-  return {
-    tokens: beyond - (haiku ? haiku.in + haiku.out : 0),
-    usd: (prefix > 0 ? (cold * beyond) / prefix : 0) - (haiku?.usd ?? 0), // cold / prefix: the write rate
-  }
+  const tokens = beyond - (haiku ? haiku.in + haiku.out : 0)
+  const usd = (prefix > 0 ? (cold * beyond) / prefix : 0) - (haiku?.usd ?? 0) // cold / prefix: the write rate
+  return { tokens, usd, isWorth: tokens > 0 && usd > 0 }
 }
 
 export type Light = 'green' | 'yellow' | 'orange' | 'red'
@@ -253,9 +259,10 @@ export function tokens(n: number): string {
   return String(n)
 }
 
-// 47:05, or 1:02:05 past an hour
+// 47:05, 60:00 for a full hour, or 1:02:05 past an hour
 export function clock(ms: number): string {
   const t = Math.max(0, Math.floor(ms / 1000))
+  if (t <= 3600) return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`
   const h = Math.floor(t / 3600)
   const m = Math.floor((t % 3600) / 60)
   const sec = String(t % 60).padStart(2, '0')
@@ -271,7 +278,8 @@ export function decide(rec: Rec, now: number, s: Settings): Verdict {
 }
 
 function decideBase(rec: Rec, now: number, s: Settings): Verdict {
-  const left = rec.at + rec.ttlMin * 60_000 - now
+  // never more than the lifetime itself (a clock set back, a record from the "future")
+  const left = Math.min(rec.at + rec.ttlMin * 60_000 - now, rec.ttlMin * 60_000)
   const c = costs(rec)
   const r = c && c.warm > 0 ? Math.round(c.cold / c.warm) : null
   const ratio = r && r >= 2 ? r : null // "(1× more)" says nothing: leave it out
@@ -290,10 +298,10 @@ function decideBase(rec: Rec, now: number, s: Settings): Verdict {
     const head = `${rec.resetBy ? RESET_LABEL[rec.resetBy] : 'cache expired'} · ${nextCold}${ctx}`
     const save = handoffSaving(rec.prefix, c?.cold ?? 0, { ...HAIKU_ESTIMATE, usd: summaryUsd(s.handoffModel, HAIKU_ESTIMATE.in, HAIKU_ESTIMATE.out) ?? 0 }, fresh)
     // nothing to show as saved (a rebuild barely above the limit): the plain suggestion
-    const suggest = save.tokens > 0 && save.usd > 0 ? `🔄 Try ${HANDOFF} to save ${tokens(save.tokens)} tokens${dollars ? ` | ${money(save.usd)}` : ''}` : SUGGEST_NEW
+    const suggest = save.isWorth ? `🔄 Try ${HANDOFF} to save ${tokens(save.tokens)} tokens${dollars ? ` | ${money(save.usd)}` : ''}` : SUGGEST_NEW
     return isBigRebuild
       ? { light: 'red', text: `🔴 ${head} · ${suggest}`, shouldPopup: !rec.warned && !rec.resetBy }
-      : { light: 'orange', text: `🟠 ${head} · Small rebuild (a new chat costs about as much), fine to keep going`, shouldPopup: false }
+      : { light: 'orange', text: `🟠 ${head} · ${save.isWorth ? 'Rebuild under your limit' : 'Small rebuild (a new chat costs about as much)'}, fine to keep going`, shouldPopup: false }
   }
   // yellow only on the 1h cache: a 5m window is too short for a useful warning
   if (rec.ttlMin >= 60 && left <= s.warnMinutes * 60_000) {
@@ -318,13 +326,20 @@ export function sendWarning(rec: Rec): string {
 
 // Fills in a record for a chat this plugin never saw reply (older chats), from
 // what Claude Code says at session start. Nothing is learned from it (read/write 0).
+// `likelyExpired` is Claude Code's own judgment (it knows the chat's TTL): it corrects the
+// lifetime (expired within the hour: a 5-minute chat; alive past 5 minutes: a 1-hour one).
 export function fromSessionStart(
-  i: { secondsSince: number; contextTokens: number; model: string; window?: number },
+  i: { secondsSince: number; contextTokens: number; model: string; window?: number; likelyExpired?: boolean },
   now: number, prev: Rec | null, s: Settings,
 ): Rec {
-  const ttlMin = prev?.ttlMin ?? ttlFor(s.memoryMinutes)
+  let ttlMin = prev?.ttlMin ?? ttlFor(s.memoryMinutes)
+  const ago = i.secondsSince * 1000
+  if (s.memoryMinutes === 'auto' && i.likelyExpired === true && ago < ttlMin * 60_000) ttlMin = 5
+  if (s.memoryMinutes === 'auto' && i.likelyExpired === false && ago > 5 * 60_000) ttlMin = 60
+  // the engine says expired though the time says not (a reset): show it expired
+  const at = i.likelyExpired === true ? Math.min(now - ago, now - ttlMin * 60_000) : now - ago
   return {
-    at: now - i.secondsSince * 1000, prefix: i.contextTokens, out: 0, model: i.model, read: 0, write: 0,
+    at, prefix: i.contextTokens, out: 0, model: i.model, read: 0, write: 0,
     ttlMin, miss5: 0, warned: false, window: i.window ?? prev?.window, isEstimate: true,
   }
 }
@@ -392,8 +407,8 @@ export const hasCounts = (s: Partial<Stats>) => COUNTS.some(k => k !== 'chats' &
 
 // The /cache-monitor-stats reply: this chat and all chats side by side.
 export function statsText(chat: Stats, all: Stats, s: Settings): string {
-  const date = (ms: number) => new Date(ms).toISOString().slice(0, 10)
   const usd = (n: number) => (n !== 0 ? money(n) : '$0.00')
+  const local = (ms: number) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
   const hit = (x: Stats) => {
     const total = x.read + x.write + x.input
     return total ? `${Math.round((x.read / total) * 100)}%` : '–'
@@ -412,7 +427,7 @@ export function statsText(chat: Stats, all: Stats, s: Settings): string {
   return [
     'cache-monitor stats',
     '',
-    `| | This chat${chat.partialSince ? ` (since ${date(chat.partialSince)})` : ''} | All chats |`,
+    `| | This chat${chat.partialSince ? ` (since ${local(chat.partialSince)})` : ''} | All chats |`,
     '|---|---|---|',
     ...lines,
     `| Chats | – | ${all.chats ?? 0} |`,
@@ -461,7 +476,9 @@ export function statsFromTranscript(jsonl: string, ttlMin: number, setting: Sett
     out.write += write
     out.input += input
     const usage = { cache_read_input_tokens: read, cache_creation_input_tokens: write }
-    if (prev && ((Number.isFinite(at) && at - prev.at > prev.ttl * 60_000) || isSilentReset(prev, usage))) {
+    // a row's timestamp is its reply's end, so a time gap also holds the reply's own length: a
+    // rebuild is told by what the request read (far less than the chat held), not by the clock
+    if (prev && isSilentReset(prev, usage)) {
       const p = priceOf(d.message.model, input + read + write, u.speed === 'fast')
       out.rebuilds++
       out.rebuildTokens += write
@@ -481,7 +498,7 @@ export function sumStats(chats: [key: string, value: unknown][], retired: unknow
   delete all.folded
   for (const [k, c] of chats) {
     const at = (c as { at?: unknown } | null)?.at
-    if (folded[`${k}@${at}`] !== undefined && !(c as Stats).retired) continue
+    if (folded[`${k}@${at}`] !== undefined) continue // a tombstone holds no counts: skipping it is harmless
     const x = addStats(c, {}, now)
     all = addStats(all, { ...x, chats: x.replies > 0 && !(c as Stats).retired ? 1 : 0 }, now)
     if (x.since < all.since) all.since = x.since
@@ -507,10 +524,12 @@ export function newerVersion(a: string, b: string): boolean {
 
 // A downloaded prices.json, checked before it can change any figure: shape, sane amounts,
 // at most 200 models, and never older than the bundled table.
-export function validatePrices(json: unknown, bundledDate: string): { sourceDate: string; prices: Record<string, [number, number]> } | { error: string } {
+// `now` given: a date more than 7 days ahead is refused (a typo would outrank every later release).
+export function validatePrices(json: unknown, bundledDate: string, now?: number): { sourceDate: string; prices: Record<string, [number, number]> } | { error: string } {
   const j = json as { sourceDate?: unknown; prices?: unknown } | null
   if (!j || typeof j !== 'object' || typeof j.sourceDate !== 'string' || !/^\d{4}-\d\d-\d\d$/.test(j.sourceDate)) return { error: 'no valid sourceDate' }
   if (j.sourceDate < bundledDate) return { error: `older than the bundled prices (${j.sourceDate} < ${bundledDate})` }
+  if (now !== undefined && j.sourceDate > new Date(now + 7 * 24 * 3600_000).toISOString().slice(0, 10)) return { error: `dated in the future (${j.sourceDate})` }
   if (!j.prices || typeof j.prices !== 'object' || Array.isArray(j.prices)) return { error: 'no prices table' }
   const entries = Object.entries(j.prices as Record<string, unknown>)
   if (!entries.length || entries.length > 200) return { error: `${entries.length} models (1 to 200 expected)` }
