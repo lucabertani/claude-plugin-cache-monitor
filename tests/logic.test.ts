@@ -4,6 +4,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { Rec } from '../types'
 import { readSettings, summaryUsd, modelLabel, modelChoices, handoffModelSuggestions } from '../hooks/logic'
+import { handoffSaving, isSilentReset, learnTtl, measureFirsts, setMeasured, speedFromTail } from '../hooks/logic'
 import { DEFAULTS, HAIKU_ESTIMATE, PRICES_DATE, addStats, clock, costs, decide, emptyStats, fromSessionStart, haikuUsd, money, newerVersion, priceOf, sendWarning, setPriceOverride, statsFromTranscript, statsText, isDevCopy, isNewModel, sumStats, tokens, ttlFor, validatePrices } from '../hooks/logic'
 import { savingsLine } from '../hooks/handoff'
 
@@ -86,31 +87,31 @@ test('5m cache never shows yellow', async () => {
 
 test('red, expired big chat: popup once', async () => {
   const v = decide(rec(), 72 * MIN, DEFAULTS)
-  expect(v.text).toBe('🔴 cache expired · next message ≈ $1.82 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 170K tokens | $1.71')
+  expect(v.text).toBe('🔴 cache expired · next message ≈ $1.82 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 144K tokens | $1.51')
   expect(v.shouldPopup).toBe(true)
   expect(decide(rec({ warned: true }), 72 * MIN, DEFAULTS).shouldPopup).toBe(false)
 })
 
 test('orange, expired small chat: no popup', async () => {
   const v = decide(rec({ prefix: 20_000 }), 72 * MIN, DEFAULTS)
-  expect(v.text).toBe('🟠 cache expired · next message ≈ $0.16 (40× more) · 20K / 1M · Small chat, fine to keep going')
+  expect(v.text).toBe('🟠 cache expired · next message ≈ $0.16 (40× more) · 20K / 1M · Small rebuild (a new chat costs about as much), fine to keep going')
   expect(v.shouldPopup).toBe(false)
 })
 
 test('model switch: reset at once on the new model, no popup', async () => {
   const v = decide(rec({ model: 'claude-sonnet-5-5', resetBy: 'model' }), 20 * MIN, DEFAULTS)
-  expect(v.text).toBe('🔴 cache reset (model changed) · next message ≈ $0.91 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 170K tokens | $0.85')
+  expect(v.text).toBe('🔴 cache reset (model changed) · next message ≈ $0.91 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 144K tokens | $0.75')
   expect(v.shouldPopup).toBe(false)
 })
 
 test('compact: reset, usually small and orange', async () => {
   expect(decide(rec({ prefix: 30_000, resetBy: 'compact' }), 1 * MIN, DEFAULTS).text).toBe(
-    '🟠 cache reset (chat compacted) · next message ≈ $0.24 (40× more) · 30K / 1M · Small chat, fine to keep going',
+    '🟠 cache reset (chat compacted) · next message ≈ $0.24 (40× more) · 30K / 1M · Small rebuild (a new chat costs about as much), fine to keep going',
   )
 })
 
 test('times style hides dollars', async () => {
-  expect(decide(rec(), 72 * MIN, { ...DEFAULTS, costStyle: 'times' }).text).toBe('🔴 cache expired · next message: 40× more · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 170K tokens')
+  expect(decide(rec(), 72 * MIN, { ...DEFAULTS, costStyle: 'times' }).text).toBe('🔴 cache expired · next message: 40× more · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 144K tokens')
   expect(decide(rec({ prefix: 50_000 }), 10 * MIN, { ...DEFAULTS, costStyle: 'times' }).text).toBe('🟢 50:00 min left · next message: normal cost · 50K / 1M · ✅ Keep going')
 })
 
@@ -126,12 +127,37 @@ test('send warning names the real cause', async () => {
 })
 
 // --- TTL ---------------------------------------------------------------------
-// Auto is always 1h: the main chat never wrote a 5m cache in any measured session (FACTS F37).
+// Auto starts at 1h and follows what each reply wrote: usage credits, an API key, a cloud
+// provider or a TTL setting give the main chat 5 minutes (code.claude.com/docs/en/prompt-caching).
 
-test('TTL: auto is always 1h; the setting forces 5 or 60', async () => {
+test('TTL: auto starts at 1h and learns from each write; the setting forces 5 or 60', async () => {
   expect(ttlFor('auto')).toBe(60)
   expect(ttlFor('5')).toBe(5)
   expect(ttlFor('60')).toBe(60)
+  expect(learnTtl('auto', { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 0 })).toBe(5)
+  expect(learnTtl('auto', { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 100 }, 5)).toBe(60)
+  expect(learnTtl('auto', {}, 5)).toBe(5) // a pure read keeps what was known
+  expect(learnTtl('auto', {})).toBe(60)
+  expect(learnTtl('60', { ephemeral_5m_input_tokens: 100 })).toBe(60)
+})
+
+test('silent reset: far less read than the chat held', async () => {
+  expect(isSilentReset({ prefix: 200_000, out: 1_000 }, { cache_read_input_tokens: 20_000, cache_creation_input_tokens: 180_000 })).toBe(true)
+  expect(isSilentReset({ prefix: 200_000, out: 1_000 }, { cache_read_input_tokens: 199_000, cache_creation_input_tokens: 3_000 })).toBe(false)
+  expect(isSilentReset({ prefix: 5_000 }, { cache_read_input_tokens: 0, cache_creation_input_tokens: 5_000 })).toBe(false) // too small to tell
+})
+
+test('fast mode: the speed of the newest main reply in the tail; 2x prices', async () => {
+  const a = (speed: string, extra = {}) => JSON.stringify({ type: 'assistant', message: { usage: { speed } }, ...extra })
+  expect(speedFromTail(['{"cut', a('standard'), a('fast')].join('\n'))).toBe(true)
+  expect(speedFromTail([a('fast'), a('standard'), a('fast', { isSidechain: true })].join('\n'))).toBe(false)
+  expect(speedFromTail('nothing here')).toBe(undefined)
+  expect(priceOf('claude-opus-5-5', 1, true)).toEqual({ input: 8, read: 0.4 })
+  expect(Math.abs(costs(rec({ fast: true }))!.cold - 3.648) < 1e-9).toBe(true)
+})
+
+test('Haiku 5.5 tier: picked from the whole prompt, uncached input included', async () => {
+  expect(priceOf('claude-haiku-5-5', 98_000 + 3_000)!.input).toBe(0.5)
 })
 
 // --- older chats -------------------------------------------------------------
@@ -140,7 +166,7 @@ test('older chat filled in from session start: expired 2h ago, red', async () =>
   const now = 10 * 60 * MIN
   const r = fromSessionStart({ secondsSince: 7200, contextTokens: 290_000, model: 'claude-opus-5-5', window: 1_000_000 }, now, null, DEFAULTS)
   expect(r.isEstimate).toBe(true)
-  expect(decide(r, now, DEFAULTS).text).toBe('🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cache-monitor-handoff to save 232K tokens | $2.21')
+  expect(decide(r, now, DEFAULTS).text).toBe('🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cache-monitor-handoff to save 206K tokens | $2.00')
 })
 
 test('older chat still warm (20 min ago): green with the right time', async () => {
@@ -179,8 +205,8 @@ test('the 🔴 tip and the handoff notice use one calculation: same figures when
   const bar = decide(r, 72 * MIN, DEFAULTS).text
   const haiku = { ...HAIKU_ESTIMATE, usd: haikuUsd(HAIKU_ESTIMATE.in, HAIKU_ESTIMATE.out) }
   const notice = savingsLine({ path: 'x.md', haiku, main: { model: r.model, tokens: r.prefix, cold: costs(r)!.cold, isCold: true } })
-  expect(bar.endsWith('to save 170K tokens | $1.71')).toBe(true)
-  expect(notice.endsWith('You saved approx 170K tokens and $1.71.')).toBe(true)
+  expect(bar.endsWith('to save 144K tokens | $1.51')).toBe(true)
+  expect(notice.endsWith('Continuing in the new chat saves approx 144K tokens and $1.51.')).toBe(true)
   expect(Math.round(haiku.usd * 1e6)).toBe(6_500) // $0.0065: 40K in at $0.10/M + 5K out at $0.50/M
 })
 
@@ -194,8 +220,8 @@ test('stats: counts add up, junk counts as empty, the table puts this chat and a
     '',
     '| | This chat | All chats |',
     '|---|---|---|',
-    '| Saved by handoffs | $1.82 | $1.82 |',
-    '| Tokens saved | 183K | 183K |',
+    '| Saved by handoffs (est.) | $1.82 | $1.82 |',
+    '| Tokens saved (est.) | 183K | 183K |',
     '| Cache hit rate | 90% | 95% |',
     '| Handoffs | 1 | 1 |',
     '| Cold rebuilds paid | 1 (228K tokens, $1.82) | 1 (228K tokens, $1.82) |',
@@ -204,7 +230,7 @@ test('stats: counts add up, junk counts as empty, the table puts this chat and a
   ].join('\n'))
   // zero dollars read "$0.00", not "<$0.01"; a chat too big to read says since when it was counted
   const empty = statsText({ ...emptyStats(now), partialSince: now }, emptyStats(now), DEFAULTS)
-  expect(empty).toContain('| Saved by handoffs | $0.00 | $0.00 |')
+  expect(empty).toContain('| Saved by handoffs (est.) | $0.00 | $0.00 |')
   expect(empty).toContain('| | This chat (since 2026-11-17) | All chats |')
   // times style: no dollar rows or amounts
   const t = statsText(emptyStats(now), emptyStats(now), { ...DEFAULTS, costStyle: 'times' })
@@ -234,6 +260,7 @@ test('transcript: requests counted once, rebuilds after the cache time, handoffs
     replies: 3, read: 50_000, write: 278_000, input: 6,
     rebuilds: 1, rebuildTokens: 228_000, rebuildUsd: 1.824,
     handoffs: 2, savedTokens: 183_000, savedUsd: 1.82,
+    first: { total: 50_002, read: 0 }, // the chat's first request: what a fresh chat costs
   })
 })
 
@@ -292,8 +319,8 @@ test('"new model?" only for a model newer than every priced one of its family', 
 })
 
 test('a tip with nothing to save falls back to the plain suggestion', () => {
-  // a 30K chat under a $0.01 limit: 30K - 45K Haiku - 13K start is below zero
-  const v = decide(rec({ prefix: 30_000, read: 30_000 }), 72 * MIN, { ...DEFAULTS, rebuildLimitUsd: 0.01 })
+  // a 40K chat, a 36.5K fresh start, a $0.01 limit: 3.5K beyond the start is red, but minus the 4K brief nothing is saved
+  const v = decide(rec({ prefix: 40_000, read: 40_000 }), 72 * MIN, { ...DEFAULTS, rebuildLimitUsd: 0.01, freshChatTokens: 36_500 })
   expect(v.light).toBe('red')
   expect(v.text.endsWith('🔄 Try /cache-monitor-handoff or a new chat')).toBe(true)
 })
@@ -303,7 +330,7 @@ test('All chats: every chat summed with the retired ones; a chat with no reply o
   const a = { ...emptyStats(now), replies: 3, read: 10 }
   const empty = emptyStats(now)
   const back = { ...emptyStats(now), replies: 1, retired: true } // resumed after retiring
-  const all = sumStats([a, empty, back], { ...emptyStats(now), replies: 5, chats: 2 }, now)
+  const all = sumStats([['st:a', a], ['st:e', empty], ['st:b', back]], { ...emptyStats(now), replies: 5, chats: 2 }, now)
   expect(all.replies).toBe(9)
   expect(all.chats).toBe(3)
 })
@@ -330,4 +357,58 @@ test('model typeahead: only on the handoff command\'s argument; aliases first, t
   expect(handoffModelSuggestions('/cache-monitor-handoff haiku x', 29, 'x')).toEqual([]) // second word
   expect(handoffModelSuggestions('/compact son', 9, 'son')).toEqual([])
   expect(handoffModelSuggestions('/cache-monitor-model op', 21, 'op')[0]!.text).toBe('opus')
+})
+
+
+// --- 0.6.0: the saving is net of a fresh chat's own start, and can be negative --------------
+test('a 94K chat whose fresh chats start at 94K: no saving, and not red', () => {
+  setMeasured({ fresh: 94_000 })
+  try {
+    const r = rec({ prefix: 94_000, read: 94_000 })
+    const s = handoffSaving(94_000, costs(r)!.cold, { in: 40_000, out: 5_000, usd: 0.0065 }, 94_000)
+    expect(s.usd < 0).toBe(true)
+    expect(s.tokens < 0).toBe(true)
+    expect(decide(r, 72 * MIN, DEFAULTS).light).toBe('orange')
+    expect(decide(rec(), 72 * MIN, DEFAULTS).light).toBe('red') // 228K: 134K beyond the start, $1.07
+  } finally {
+    setMeasured({})
+  }
+})
+
+test('the fresh start: the setting, else your own chats\' median first prompt (5 or more), else 35K', () => {
+  expect(measureFirsts([{ total: 10, read: 0 }])).toEqual({})
+  expect(measureFirsts([1, 2, 3, 4, 5].map(n => ({ total: n * 10_000, read: n * 1_000 })))).toEqual({ fresh: 30_000, system: 3_000 })
+  expect(readSettings({ freshChatTokens: 50_000 }).freshChatTokens).toBe(50_000)
+  expect(readSettings({}).freshChatTokens).toBe(0)
+})
+
+test('money and stats show a negative estimate as negative', () => {
+  expect(money(-0.04)).toBe('-$0.04')
+  const now = 0
+  expect(statsText({ ...emptyStats(now), savedUsd: -0.04, savedTokens: -2_000 }, emptyStats(now), DEFAULTS)).toContain('| Saved by handoffs (est.) | -$0.04 | $0.00 |')
+})
+
+test('transcript: a 5-minute chat rebuilds after 5 minutes at 1.25x; a "<$0.01" notice keeps its tokens', () => {
+  const r5 = (id: string, at: string, read: number, write: number) =>
+    row({ type: 'assistant', timestamp: at, message: { id, model: 'claude-opus-5-5', usage: { input_tokens: 0, cache_read_input_tokens: read, cache_creation_input_tokens: write, output_tokens: 0, cache_creation: { ephemeral_5m_input_tokens: write, ephemeral_1h_input_tokens: 0 } } } })
+  const s = statsFromTranscript([
+    r5('a1', '2026-11-17T10:00:00Z', 0, 100_000),
+    r5('a2', '2026-11-17T10:10:00Z', 0, 100_000), // 10 min later on a 5-minute cache
+    row({ type: 'system', content: 'Handoff saved to x.md. This command never resent the chat to Opus: no cache read, no rebuild. You saved approx 12K tokens and <$0.01.' }),
+  ].join('\n'), 60)
+  expect(s.rebuilds).toBe(1)
+  expect(Math.abs(s.rebuildUsd - 0.5) < 1e-9).toBe(true) // 100K x $4 x 1.25
+  expect(s.savedTokens).toBe(12_000)
+})
+
+test('All chats: a chat already folded into st:retired is skipped until its marker is written', () => {
+  const a = { ...emptyStats(0), at: 5, replies: 3 }
+  const all = sumStats([['st:a', a]], { ...emptyStats(0), replies: 3, chats: 1, folded: { 'st:a@5': 1 } }, 0)
+  expect(all.replies).toBe(3)
+  expect(all.chats).toBe(1)
+})
+
+test('compact keeps the system layer cached: only the rest is written', () => {
+  // 30K: 20K read at $0.20/M + 10K written at $8/M
+  expect(Math.abs(costs(rec({ prefix: 30_000, cached: 20_000 }))!.cold - 0.084) < 1e-9).toBe(true)
 })

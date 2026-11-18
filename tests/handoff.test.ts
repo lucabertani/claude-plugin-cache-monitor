@@ -5,7 +5,7 @@ import type { SessionMessage } from 'claude-code'
 
 import {
   assembleBrief, extractFacts, factsBlock, fenced, handoffPath, hasUnansweredLastRequest, isValidBrief,
-  parseSkill, renderTemplate, renderTranscript, savingsLine, sectionHeadings, userText,
+  parseSkill, renderTemplate, renderTranscript, savingsLine, sectionHeadings, seedPath, userText,
 } from '../hooks/handoff'
 
 const user = (text: string): SessionMessage => ({ role: 'user', text, toolUses: [] })
@@ -62,7 +62,7 @@ test('facts: edited files, commits from git output only, issues, last real user 
     user('<system-reminder>not the user</system-reminder>'),
     user('<command-name>/model</command-name>'),
   ])
-  expect(f).toEqual({ filesModified: ['hooks/a.ts'], commits: ['Fix the bar (abc1234)', 'Quiet: a & b'], issues: ['#42'], lastUserMessage: 'fix #42 please' })
+  expect(f).toEqual({ filesModified: ['hooks/a.ts'], commits: ['Fix the bar (abc1234)', 'Quiet: a & b (unverified: `git commit -q` printed nothing, so it may not have run; check git log)'], issues: ['#42'], lastUserMessage: 'fix #42 please' })
 })
 
 test('harness rows are labelled, never taken for the user; the seed line is not a request', async () => {
@@ -98,10 +98,16 @@ test('numbers come from the bar record; none known says unknown', async () => {
   expect(factsBlock(f, {})).toContain('## Last Real User Message (verbatim)\nNone found.')
 })
 
-test('brief check: a reply with none of the sections is not a brief', async () => {
-  const brief = parseSkill(SKILL_MD).brief
-  expect(isValidBrief('## Handoff Confidence\nHigh', brief)).toBe(true)
+test('brief check: the last request (and next steps, where the skill names them) must be there, with text', async () => {
+  const brief = parseSkill(SKILL_MD).brief // names Last Request, not Next Steps
+  expect(isValidBrief('## Handoff Confidence\nHigh', brief)).toBe(false) // a stub is not a brief
   expect(isValidBrief('Sure! Here is a summary.', brief)).toBe(false)
+  expect(isValidBrief('## Last Request from the User\n\n## Goal\nx', brief)).toBe(false) // heading with nothing under it
+  expect(isValidBrief('## Handoff Confidence\nHigh\n\n## Last Request from the User\ndo x\nStatus: Answered', brief)).toBe(true)
+  const full = '# Final brief\n## Handoff Confidence\nx\n## Last Request from the User\nx\n## Next Steps\nx'
+  expect(isValidBrief('## Last Request from the User\ndo x', full)).toBe(false) // no next steps
+  expect(isValidBrief('## Last Request from the User\ndo x\n\n## Next Steps\n1. y', full)).toBe(true)
+  expect(isValidBrief('## Goal\nx', '## Goal\n## Other')).toBe(true) // a skill naming neither: any section
 })
 
 test('priority switch: on for Not answered or Partially answered, off for Answered', async () => {
@@ -124,7 +130,7 @@ test('the saved file: instructions, header with transcript, brief, facts; facts-
   expect(ok).toContain('`~/t.jsonl`')
   expect(ok).toContain('## Handoff Confidence')
   expect(ok).toContain('- a.ts')
-  expect(ok.includes('## Last Real User Message')).toBe(false) // the brief quotes it already
+  expect(ok).toContain('## Last Real User Message (verbatim)\ndo x') // from code, whatever the brief says
   const bare = assembleBrief(ctx, f, {}, undefined)
   expect(bare).toContain('Confirm in two sentences.')
   expect(bare).toContain('Haiku did not return a usable brief')
@@ -136,11 +142,12 @@ test('old-chat line: short while warm; once expired, approx saving = rebuild −
   const haiku = { in: 41_000, out: 5_000, usd: 0.0066 } // $0.10/M in, $0.50/M out
   expect(savingsLine({ path: 'h.md', haiku, main: { ...main, isCold: false } })).toBe(
     'Handoff saved to h.md. This command never resent the chat to Opus: no cache read, no rebuild.')
-  // 226,802 - (41,000 + 5,000) - 13,000 fresh start = 167,802; $2.27 - $0.0066 - $2.27 × 13,000 / 226,802 = $2.13
+  // 226,802 - 35,000 fresh start - 4,000 brief = 187,802; - 46,000 Haiku = 141,802; $2.27 × 187,802 / 226,802 - $0.0066 = $1.87
   expect(savingsLine({ path: 'h.md', haiku, main: { ...main, isCold: true } })).toBe(
-    'Handoff saved to h.md. This command never resent the chat to Opus: no cache read, no rebuild. You saved approx 168K tokens and $2.13.')
-  expect(savingsLine({ path: 'h.md', haiku: null, main: null, problem: 'Haiku api-error' })).toBe(
-    'Handoff saved to h.md (facts only: Haiku api-error). This command never resent the chat to the main model: no cache read, no rebuild.')
+    'Handoff saved to h.md. This command never resent the chat to Opus: no cache read, no rebuild. Continuing in the new chat saves approx 142K tokens and $1.87.')
+  // a chat the size of a fresh one: no saving, and the line says so
+  expect(savingsLine({ path: 'h.md', haiku, main: { model: 'claude-opus-5-5', tokens: 94_000, cold: 0.752, isCold: true, fresh: 94_000 } })).toBe(
+    "Handoff saved to h.md. This command never resent the chat to Opus: no cache read, no rebuild. A new chat's own start costs about as much as rebuilding this one (approx $0.04 more), so the handoff saves nothing here.")
 })
 
 test('one file per handoff, by date to the second and chat id', async () => {
@@ -159,4 +166,23 @@ test('the last user message is cut at 4,000 characters in the facts', async () =
   const f = extractFacts([user('x'.repeat(10_000))])
   expect(f.lastUserMessage!.length).toBe(4_000 + ' [cut]'.length)
   expect(f.lastUserMessage!.endsWith(' [cut]')).toBe(true)
+})
+
+
+test('a screenshot message is the user\'s own; only the exact seed line and image-only rows are not', async () => {
+  const f = extractFacts([user('implement the change'), user('[Image #1] stop, just review this screenshot')])
+  expect(f.lastUserMessage).toBe('[Image #1] stop, just review this screenshot')
+  expect(userText(user('Read .claude/handoffs/ first, then the docs/ folder'))).toBe('Read .claude/handoffs/ first, then the docs/ folder')
+  expect(userText(user('Read .claude/handoffs/2026-11-16-223015-ab754061.md and continue from where we left off.'))).toBe(undefined)
+  expect(userText(user('[Image #1] [Image #2]'))).toBe(undefined)
+})
+
+test('a quiet commit known only from its command is marked unverified', async () => {
+  const f = extractFacts([asst('', [tool('Bash', { command: 'false && git commit -q -m "Ship release" || true' }, '')])])
+  expect(f.commits).toEqual(['Ship release (unverified: `git commit -q` printed nothing, so it may not have run; check git log)'])
+})
+
+test('the seed line names its file', async () => {
+  expect(seedPath('Read .claude/handoffs/a-b.md and continue from where we left off.')).toBe('.claude/handoffs/a-b.md')
+  expect(seedPath('hello')).toBe(undefined)
 })

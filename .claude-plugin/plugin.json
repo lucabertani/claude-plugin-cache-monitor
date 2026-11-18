@@ -1,13 +1,13 @@
 {
   "name": "cache-monitor",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Shows how long Claude's chat memory (prompt cache) stays active and what your next message costs, with a plain-language tip",
   "types": "./types/index.d.ts",
   "userConfig": {
     "rebuildLimitUsd": {
       "type": "number",
       "title": "Rebuild limit ($)",
-      "description": "Above this rebuild cost, the bar suggests a new chat instead of carrying on.",
+      "description": "Above this cost of rebuilding the chat beyond what a new chat would cost anyway, the bar turns red and suggests a handoff.",
       "default": 0.5
     },
     "warnMinutes": {
@@ -35,13 +35,19 @@
     "memoryMinutes": {
       "type": "string",
       "title": "Memory time",
-      "description": "auto = 1 hour (Claude subscription). Choose 5 if you use an API key; 60 forces 1 hour.",
+      "description": "auto = learned from each reply (1 hour on a subscription within its plan; 5 minutes on usage credits, an API key, a cloud provider or a TTL setting). 5 or 60 forces it.",
       "options": [
         "auto",
         "5",
         "60"
       ],
       "default": "auto"
+    },
+    "freshChatTokens": {
+      "type": "number",
+      "title": "Fresh chat size (tokens)",
+      "description": "What a new chat's first prompt sends (system prompt, tools, CLAUDE.md, memory). 0 = measured from your own chats (35000 until 5 are measured). Used for the handoff saving and the red light.",
+      "default": 0
     },
     "handoffModel": {
       "type": "string",

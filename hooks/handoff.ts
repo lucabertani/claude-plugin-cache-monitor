@@ -13,8 +13,13 @@ const MAX_TRANSCRIPT_CHARS = 150_000
 const MAX_TOOL_INPUT = 300
 const MAX_LAST_MESSAGE = 4_000 // a pasted log must not flood Haiku's prompt or the saved file
 
-// Harness messages that arrive as user rows but are never the user's own words.
-const META_PREFIXES = ['Stop hook feedback', '[Image', '<system-reminder>', '<command-name>', '<local-command', '<task-notification>', 'Read .claude/handoffs/']
+// Harness messages that arrive as user rows but are never the user's own words: only their
+// generated forms (a tag the harness writes, the hook-feedback header). A user's own message
+// that merely starts like one (a screenshot's "[Image #1] look at this") is kept.
+const META_PREFIXES = ['Stop hook feedback', '<system-reminder>', '<command-name>', '<local-command-', '<task-notification>']
+// A row that is only image placeholders carries no words; the seed line, only in its exact form.
+const IMAGE_ONLY = /^(?:\[Image[^\]\n]*\]\s*)+$/
+const SEED_LINE = /^Read \.claude\/handoffs\/[\w.-]+\.md and continue from where we left off\.$/
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
 const GIT_COMMIT_OUTPUT = /^\[[\w./-]+(?: \(root-commit\))? ([0-9a-f]{7,})\] (.+)$/m
 // `git commit -q` prints no "[main abc1234]" line, so its subject comes from -m (quotes may hold & or ;)
@@ -38,7 +43,7 @@ export function parseSkill(md: string): Skill {
 export function userText(m: SessionMessage): string | undefined {
   if (m.role !== 'user') return undefined
   const raw = m.text.trim()
-  return raw && !META_PREFIXES.some(p => raw.startsWith(p)) ? raw : undefined
+  return raw && !META_PREFIXES.some(p => raw.startsWith(p)) && !IMAGE_ONLY.test(raw) && !SEED_LINE.test(raw) ? raw : undefined
 }
 
 export function extractFacts(messages: readonly SessionMessage[]): Facts {
@@ -58,7 +63,8 @@ export function extractFacts(messages: readonly SessionMessage[]): Facts {
       const out = typeof t.text === 'string' ? t.text.match(GIT_COMMIT_OUTPUT) : null
       const quiet = out ? null : t.input.command.match(QUIET_COMMIT)?.[1]
       const msg = quiet && /(?:^|\s)(?:-q|--quiet)\b/.test(quiet) && !/nothing to commit/.test(`${t.text ?? ''}`) ? quiet.match(/-m\s+(["'])(.*?)\1/)?.[2] : undefined
-      const subject = out ? `${out[2]} (${out[1]})` : msg
+      // a quiet commit prints nothing, so only the command says it ran: never stated as fact
+      const subject = out ? `${out[2]} (${out[1]})` : msg && `${msg} (unverified: \`git commit -q\` printed nothing, so it may not have run; check git log)`
       if (subject && !commits.includes(subject)) commits.push(subject)
     }
   }
@@ -97,7 +103,7 @@ ${nums.length ? nums.join('\n') : 'unknown'}
 ## Files Modified (from Edit/Write calls)
 ${list(f.filesModified)}
 
-## Commits This Chat
+## Commits This Chat (hash = git printed it; "unverified" = only the command says so)
 ${list(f.commits)}
 
 ## GitHub Issues Mentioned
@@ -113,8 +119,28 @@ export function briefPrompt(messages: readonly SessionMessage[], f: Facts, n: Nu
 /** The "## " headings the brief asks for. */
 export const sectionHeadings = (brief: string) => [...brief.matchAll(/^## (.+)$/gm)].map(m => `## ${m[1]!.trim()}`)
 
-/** A reply holding none of the sections is a fragment, not a brief. */
-export const isValidBrief = (text: string, brief: string) => sectionHeadings(brief).some(h => text.includes(h))
+// The sections a brief must hold to replace the chat: what was asked last, and what to do next.
+const REQUIRED = /^## (?:Last Request from the User|Next Steps)$/
+
+/** The text under one "## " heading, up to the next heading; undefined when the heading is missing. */
+function sectionBody(text: string, heading: string): string | undefined {
+  const at = text.split('\n').findIndex(l => l.trim() === heading)
+  if (at < 0) return undefined
+  const rest = text.split('\n').slice(at + 1)
+  const end = rest.findIndex(l => /^#{1,2}\s/.test(l))
+  return (end < 0 ? rest : rest.slice(0, end)).join('\n').trim()
+}
+
+/**
+ * A usable brief holds every required section (the last request, the next steps) with something
+ * under it; a skill file naming neither needs any one of its sections. Anything less is a fragment.
+ */
+export function isValidBrief(text: string, brief: string): boolean {
+  const all = sectionHeadings(brief)
+  const required = all.filter(h => REQUIRED.test(h))
+  if (!required.length) return all.some(h => text.includes(h))
+  return required.every(h => !!sectionBody(text, h))
+}
 
 /** Whether the brief's last-request section says it is not (fully) answered. */
 export function hasUnansweredLastRequest(text: string): boolean {
@@ -145,8 +171,8 @@ export function assembleBrief(ctx: Ctx, f: Facts, n: Numbers, haiku: string | un
 - **Previous chat:** ${ctx.sessionId}
 - **Transcript (grep it, never read it whole):** \`${ctx.transcript}\`
 - **How this was written:** ${haiku ? `${ctx.writer ?? 'Haiku'} wrote the judgment sections from the conversation, abbreviated (long messages cut, tool output left out). They are a model\'s summary of the chat, not the user's own words. The facts at the end came from the tool calls, in code.` : `${ctx.writer ?? 'Haiku'} did not return a usable brief, so this holds only the facts extracted in code. Grep the transcript for the rest.`}`
-  // a usable brief already quotes the last request in its own section
-  return `${[header, haiku?.trim(), factsBlock(f, n, !haiku)].filter(Boolean).join('\n\n')}\n`
+  // the user's last message always comes from code, verbatim, whatever the model wrote
+  return `${[header, haiku?.trim(), factsBlock(f, n)].filter(Boolean).join('\n\n')}\n`
 }
 
 /** Claude Code keeps transcripts under the folder with every non-alphanumeric character as '-'. */
@@ -165,17 +191,20 @@ const family = (model: string) => /opus|sonnet|haiku|fable/.exec(model)?.[0]?.re
 
 /**
  * The line printed in the old chat. Warm cache: only that nothing was resent. Expired cache:
- * also the rough saving, the bar's rebuild minus Haiku's input and output.
- * `problem` says why the brief is facts only.
+ * also the rough saving (the bar's calculation), which counts once the new chat is used.
  */
 export function savingsLine(i: {
   path: string
   haiku: { in: number; out: number; usd: number } | null
-  main: { model: string; tokens: number; cold: number; isCold: boolean } | null
-  problem?: string
+  main: { model: string; tokens: number; cold: number; isCold: boolean; fresh?: number } | null
 }): string {
-  const head = `Handoff saved to ${i.path}${i.problem ? ` (facts only: ${i.problem})` : ''}. This command never resent the chat to ${i.main ? family(i.main.model) : 'the main model'}: no cache read, no rebuild.`
+  const head = `Handoff saved to ${i.path}. This command never resent the chat to ${i.main ? family(i.main.model) : 'the main model'}: no cache read, no rebuild.`
   if (!i.main?.isCold) return head
-  const saved = handoffSaving(i.main.tokens, i.main.cold, i.haiku) // the bar's 🔴 tip uses the same calculation
-  return `${head} You saved approx ${tokens(saved.tokens)} tokens and ${money(saved.usd)}.`
+  const saved = handoffSaving(i.main.tokens, i.main.cold, i.haiku, i.main.fresh) // the bar's 🔴 tip uses the same calculation
+  return saved.usd > 0
+    ? `${head} Continuing in the new chat saves approx ${tokens(Math.max(0, saved.tokens))} tokens and ${money(saved.usd)}.`
+    : `${head} A new chat's own start costs about as much as rebuilding this one (approx ${money(-saved.usd)} more), so the handoff saves nothing here.`
 }
+
+/** The handoff file a seed line points at, or undefined. */
+export const seedPath = (text: string) => /Read (\.claude\/handoffs\/[\w.-]+\.md) and continue from where we left off\./.exec(text)?.[1]

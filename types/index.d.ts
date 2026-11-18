@@ -7,12 +7,14 @@ export type Rec = {
   model: string
   read: number
   write: number
-  ttlMin: number // 60, or 5 when the user forces it (ttlFor)
+  ttlMin: number // 60 or 5: what the last reply's cache write used (learnTtl), or the forced setting
   miss5: number // unused since 0.1.3 (always 0); kept so older saved records still load
   warned: boolean // expiry pop-up already shown for this request
   window?: number // the model's context window in tokens
   resetBy?: 'model' | 'compact' // cache gone before its time ran out; cleared by the next reply
   isEstimate?: boolean // filled in from session-start data, not from a reply this plugin saw
+  fast?: boolean // the last reply came at fast-mode speed (2x prices, a cache of its own)
+  cached?: number // tokens still cached after a reset (the system prompt layer a compaction keeps)
 }
 
 declare module 'claude-code' {

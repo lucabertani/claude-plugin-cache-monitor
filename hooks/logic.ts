@@ -9,6 +9,7 @@ export type Settings = {
   costStyle: 'dollars' | 'times'
   memoryMinutes: 'auto' | '5' | '60'
   handoffModel: string // the model /cache-monitor-handoff summarizes with: an alias (haiku) or a full model id
+  freshChatTokens: number // a fresh chat's first prompt in tokens; 0 = measured from your own chats
 }
 
 export const DEFAULTS: Settings = {
@@ -18,6 +19,7 @@ export const DEFAULTS: Settings = {
   costStyle: 'dollars',
   memoryMinutes: 'auto',
   handoffModel: 'haiku',
+  freshChatTokens: 0,
 }
 
 // USD per million tokens: [input, cache read], keyed by exact family-version.
@@ -76,34 +78,74 @@ export function isNewModel(model: string): boolean {
   return known.every(k => m.v[0] > k!.v[0] || (m.v[0] === k!.v[0] && m.v[1] > k!.v[1]))
 }
 
-export function priceOf(model: string, prefix: number): { input: number; read: number } | null {
+// `prompt`: the request's whole prompt (input + cache read + cache write), which picks Haiku 5.5's tier.
+// `fast`: the reply came at fast-mode speed (usage.speed "fast"; the model id stays the plain one).
+export function priceOf(model: string, prompt: number, fast = false): { input: number; read: number } | null {
   const id = model.toLowerCase()
   const parsed = parseModel(id)
   if (!parsed) return null
   const key = parsed.key
   const p = priceOverride?.[key] ?? PRICES[key]
   if (!p) return null
-  const tier = key === 'haiku-5-5' && prefix > 100_000 ? 5 : 1 // Haiku 5.5 bills prompts over 100K at 5x
-  const fast = id.includes('-fast') ? 2 : 1 // fast-mode deployments cost 2x
-  return { input: p[0] * tier * fast, read: p[1] * tier * fast }
+  const tier = key === 'haiku-5-5' && prompt > 100_000 ? 5 : 1 // Haiku 5.5 bills prompts over 100K at 5x
+  // fast mode costs 2x (Opus 5.5 $8/M in, Fable 5.2 $16/M); an id with -fast is an older deployment form
+  const speed = fast || id.includes('-fast') ? 2 : 1
+  return { input: p[0] * tier * speed, read: p[1] * tier * speed }
 }
+
+export const writeRate = (input: number, ttlMin: number) => input * (ttlMin >= 60 ? 2 : 1.25)
 
 // warm: the cached part is read; the last reply's output (and your new message) is
-// written. cold: everything is written. Writes cost 1.25x (5m) or 2x (1h) of input.
+// written. cold: everything is written, except `cached` (the system prompt layer a
+// compaction keeps). Writes cost 1.25x (5m) or 2x (1h) of input.
 export function costs(rec: Rec): { warm: number; cold: number } | null {
-  const p = priceOf(rec.model, rec.prefix)
+  const p = priceOf(rec.model, rec.prefix, rec.fast)
   if (!p) return null
-  const write = p.input * (rec.ttlMin >= 60 ? 2 : 1.25)
+  const write = writeRate(p.input, rec.ttlMin)
   // a record from an older version may lack `out`: treat it as 0, never NaN
   const out = Number.isFinite(rec.out) ? Math.min(rec.out, rec.prefix) : 0
-  return { warm: ((rec.prefix - out) * p.read + out * write) / 1e6, cold: (rec.prefix * write) / 1e6 }
+  const kept = Number.isFinite(rec.cached) ? Math.min(Math.max(0, rec.cached!), rec.prefix) : 0
+  return { warm: ((rec.prefix - out) * p.read + out * write) / 1e6, cold: (kept * p.read + (rec.prefix - kept) * write) / 1e6 }
 }
 
-// The cache lifetime. Measured (FACTS F37): a subscription's main chat always writes
-// the 1h cache; only subagents write 5m, and the bar ignores them. So `auto` is 1h,
-// never guessed down. shortcut: API-key users pick 5 by hand; the update package brings real per-model TTLs.
+// The cache lifetime before anything was measured. Claude Code gives the main chat 1h only on a
+// subscription within its plan's usage; usage credits, an API key, a cloud provider or
+// promptCacheTtl / CLAUDE_CODE_PROMPT_CACHE_TTL / FORCE_PROMPT_CACHING_5M give 5 minutes
+// (code.claude.com/docs/en/prompt-caching#cache-lifetime). `auto` starts at 1h and learns from each reply.
 export function ttlFor(setting: Settings['memoryMinutes']): number {
   return setting === 'auto' ? 60 : Number(setting)
+}
+
+// `auto`: the lifetime the reply's own cache write used (usage.cache_creation's ephemeral_1h /
+// ephemeral_5m); a reply that wrote nothing keeps what was known, since a read keeps the entry's TTL.
+export function learnTtl(setting: Settings['memoryMinutes'], u: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number }, known?: number): number {
+  if (setting !== 'auto') return Number(setting)
+  if ((u.ephemeral_1h_input_tokens ?? 0) > 0) return 60
+  if ((u.ephemeral_5m_input_tokens ?? 0) > 0) return 5
+  return known ?? 60
+}
+
+// A reply that read far less than the chat held, while the cache should have been alive:
+// something reset it (fast mode toggled, effort or tools changed, old images dropped, a skill's model).
+export function isSilentReset(prev: { prefix: number; out?: number }, u: { cache_read_input_tokens: number; cache_creation_input_tokens: number }): boolean {
+  const expected = prev.prefix - (Number.isFinite(prev.out) ? prev.out! : 0)
+  return expected >= 10_000 && u.cache_creation_input_tokens >= 2_048 && u.cache_read_input_tokens < expected * 0.5
+}
+
+// Speed of the newest main-chat reply in a transcript's tail: the engine's usage has no speed field.
+export function speedFromTail(tail: string): boolean | undefined {
+  const lines = tail.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i]!
+    if (!l.includes('"speed"') || !l.includes('"assistant"')) continue
+    try {
+      const d = JSON.parse(l) as { type?: string; isSidechain?: boolean; message?: { usage?: { speed?: string } } }
+      if (d.type !== 'assistant' || d.isSidechain) continue
+      const s = d.message?.usage?.speed
+      if (typeof s === 'string') return s === 'fast'
+    } catch { /* a line cut by the tail */ }
+  }
+  return undefined
 }
 
 // Aliases accepted by the handoffModel setting, mapped to the model they price as.
@@ -152,17 +194,38 @@ export const haikuUsd = (inTok: number, outTok: number): number => summaryUsd('h
 // Four real handoffs used 12K-46K in+out, so this is the top: the bar never promises more than the notice reports.
 export const HAIKU_ESTIMATE = { in: 40_000, out: 5_000 }
 
-// The one saving calculation, for the bar (Haiku estimated) and the handoff's notice (Haiku measured):
-// the rebuild the handoff avoids, minus what Haiku read, wrote and cost.
-// The fresh chat's own first cache write: a median of 9.3K tokens over 890 of your chats (FACTS F47b),
-// plus reading the brief (~4K tokens: briefs ran 13.8-15.6K chars). Priced at the main model's write rate.
-export const FRESH_START_TOKENS = 13_000
+// A fresh chat is not free: its first prompt resends the system prompt, tools, CLAUDE.md and memory.
+// That part costs the same in the old chat and the new one (both read it if another session keeps
+// it warm, both write it if not), so only the chat beyond it is saved. Measured from your own chats'
+// first requests (median, 5 or more), else the freshChatTokens setting, else this default
+// (median first prompt over 119 of the author's chats: 36.6K).
+export const FRESH_START_DEFAULT = 35_000
+export const BRIEF_TOKENS = 4_000 // the new chat reads the brief: briefs ran 13.8-15.6K chars
+export const SYSTEM_LAYER_DEFAULT = 20_000 // the system prompt and tools, still cached after a compaction
 
-export function handoffSaving(prefix: number, cold: number, haiku: { in: number; out: number; usd: number } | null) {
-  const startUsd = prefix > 0 ? (cold * FRESH_START_TOKENS) / prefix : 0 // cold is the whole prefix at the write rate
+let measured: { fresh?: number; system?: number } = {}
+export function setMeasured(m: { fresh?: number; system?: number }) {
+  measured = m
+}
+export const freshStart = (s: Settings) => (s.freshChatTokens > 0 ? s.freshChatTokens : measured.fresh ?? FRESH_START_DEFAULT)
+export const systemLayer = () => measured.system ?? SYSTEM_LAYER_DEFAULT
+
+// Medians of the first requests /cache-monitor-stats keeps per chat; null below 5 samples.
+export function measureFirsts(firsts: { total: number; read: number }[]): { fresh?: number; system?: number } {
+  const med = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]! }
+  const ok = firsts.filter(f => Number.isFinite(f.total) && f.total > 0)
+  const reads = ok.map(f => f.read).filter(r => Number.isFinite(r) && r > 0)
+  return { ...(ok.length >= 5 ? { fresh: med(ok.map(f => f.total)) } : {}), ...(reads.length >= 5 ? { system: med(reads) } : {}) }
+}
+
+// The one saving calculation, for the bar (Haiku estimated) and the handoff's notice (Haiku measured):
+// the rebuild beyond a fresh chat's own start and the brief, minus what Haiku read, wrote and cost.
+// Negative when a fresh chat costs about as much as the rebuild: the handoff then saves nothing.
+export function handoffSaving(prefix: number, cold: number, haiku: { in: number; out: number; usd: number } | null, fresh = FRESH_START_DEFAULT) {
+  const beyond = prefix - fresh - BRIEF_TOKENS
   return {
-    tokens: Math.max(0, prefix - (haiku ? haiku.in + haiku.out : 0) - FRESH_START_TOKENS),
-    usd: Math.max(0, cold - (haiku?.usd ?? 0) - startUsd),
+    tokens: beyond - (haiku ? haiku.in + haiku.out : 0),
+    usd: (prefix > 0 ? (cold * beyond) / prefix : 0) - (haiku?.usd ?? 0), // cold / prefix: the write rate
   }
 }
 
@@ -172,6 +235,7 @@ export type Verdict = { light: Light; text: string; shouldPopup: boolean }
 // Cents. The ratio comes from exact amounts, so it can differ slightly from the
 // rounded ones shown ($0.05 × 40 ≠ $1.82 is expected; you chose cents anyway).
 export function money(usd: number): string {
+  if (usd < 0) return `-${money(-usd)}`
   if (usd < 0.01) return '<$0.01'
   const cents = Math.round(usd * 100) / 100 // round first: $9.996 shows "$10", like every amount from $10 up
   return `$${cents < 10 ? cents.toFixed(2) : cents.toFixed(0)}`
@@ -216,17 +280,20 @@ function decideBase(rec: Rec, now: number, s: Settings): Verdict {
   const ctx = rec.window ? ` · ${tokens(rec.prefix)} / ${tokens(rec.window)}` : ''
   const nextWarm = dollars ? `next message ≈ ${money(c.warm)}` : 'next message: normal cost'
   const nextCold = dollars ? `next message ≈ ${money(c.cold)}${more}` : `next message: ${ratio ? `${ratio}× more` : r ? 'normal cost' : 'much more'}`
+  // what a new chat would not pay: the rebuild beyond a fresh chat's own first prompt.
   // no price known: fall back to size (≈ $0.50 of Opus 5.5 rebuild)
-  const isBigRebuild = c ? c.cold >= s.rebuildLimitUsd : rec.prefix >= 60_000
+  const fresh = freshStart(s)
+  const beyond = Math.max(0, rec.prefix - fresh)
+  const isBigRebuild = c ? (rec.prefix > 0 ? (c.cold * beyond) / rec.prefix : 0) >= s.rebuildLimitUsd : beyond >= 60_000
 
   if (left <= 0 || rec.resetBy) {
     const head = `${rec.resetBy ? RESET_LABEL[rec.resetBy] : 'cache expired'} · ${nextCold}${ctx}`
-    const save = handoffSaving(rec.prefix, c?.cold ?? 0, { ...HAIKU_ESTIMATE, usd: summaryUsd(s.handoffModel, HAIKU_ESTIMATE.in, HAIKU_ESTIMATE.out) ?? 0 })
+    const save = handoffSaving(rec.prefix, c?.cold ?? 0, { ...HAIKU_ESTIMATE, usd: summaryUsd(s.handoffModel, HAIKU_ESTIMATE.in, HAIKU_ESTIMATE.out) ?? 0 }, fresh)
     // nothing to show as saved (a rebuild barely above the limit): the plain suggestion
     const suggest = save.tokens > 0 && save.usd > 0 ? `🔄 Try ${HANDOFF} to save ${tokens(save.tokens)} tokens${dollars ? ` | ${money(save.usd)}` : ''}` : SUGGEST_NEW
     return isBigRebuild
       ? { light: 'red', text: `🔴 ${head} · ${suggest}`, shouldPopup: !rec.warned && !rec.resetBy }
-      : { light: 'orange', text: `🟠 ${head} · Small chat, fine to keep going`, shouldPopup: false }
+      : { light: 'orange', text: `🟠 ${head} · Small rebuild (a new chat costs about as much), fine to keep going`, shouldPopup: false }
   }
   // yellow only on the 1h cache: a 5m window is too short for a useful warning
   if (rec.ttlMin >= 60 && left <= s.warnMinutes * 60_000) {
@@ -255,7 +322,7 @@ export function fromSessionStart(
   i: { secondsSince: number; contextTokens: number; model: string; window?: number },
   now: number, prev: Rec | null, s: Settings,
 ): Rec {
-  const ttlMin = ttlFor(s.memoryMinutes)
+  const ttlMin = prev?.ttlMin ?? ttlFor(s.memoryMinutes)
   return {
     at: now - i.secondsSince * 1000, prefix: i.contextTokens, out: 0, model: i.model, read: 0, write: 0,
     ttlMin, miss5: 0, warned: false, window: i.window ?? prev?.window, isEstimate: true,
@@ -276,6 +343,7 @@ export function readSettings(o: Record<string, unknown>): Settings {
     memoryMinutes: o.memoryMinutes === '5' || o.memoryMinutes === '60' ? o.memoryMinutes : 'auto',
     // "custom" in the picker: the free-text field holds the model
     handoffModel: (o.handoffModel === 'custom' ? validModel(o.handoffModelCustom) : validModel(o.handoffModel)) ?? DEFAULTS.handoffModel,
+    freshChatTokens: num(o.freshChatTokens, 0),
   }
 }
 
@@ -290,12 +358,14 @@ export type Stats = {
   rebuildTokens: number
   rebuildUsd: number
   handoffs: number
-  savedTokens: number // the handoff notice's own figures, counted only when the cache had expired
+  savedTokens: number // a handoff's estimated saving, counted once its new chat is used (once per handoff file)
   savedUsd: number
   chats?: number // all chats only
   isFilled?: boolean // this chat's history was read from its transcript (or never needs reading)
   partialSince?: number // transcript too big to read: counted from this time only
   retired?: boolean // pruned after 90 days: its counts live on in st:retired, it counts as a chat there
+  first?: { total: number; read: number } // this chat's first request: what a fresh chat costs (freshStart)
+  folded?: Record<string, number> // st:retired only: `<key>@<at>` of every chat generation already folded in
 }
 
 const COUNTS = ['replies', 'read', 'write', 'input', 'rebuilds', 'rebuildTokens', 'rebuildUsd', 'handoffs', 'savedTokens', 'savedUsd', 'chats'] as const
@@ -313,13 +383,17 @@ export function addStats(s: unknown, d: Partial<Stats>, now: number): Stats {
     out[k] = (Number.isFinite(cur) ? cur : 0) + v
   }
   if (!Number.isFinite(out.since)) out.since = now
+  if (!out.first && d.first) out.first = d.first
   return out
 }
+
+// A record still holding counts of its own (a tombstone holds none until its chat is resumed).
+export const hasCounts = (s: Partial<Stats>) => COUNTS.some(k => k !== 'chats' && Number(s[k] ?? 0) !== 0)
 
 // The /cache-monitor-stats reply: this chat and all chats side by side.
 export function statsText(chat: Stats, all: Stats, s: Settings): string {
   const date = (ms: number) => new Date(ms).toISOString().slice(0, 10)
-  const usd = (n: number) => (n > 0 ? money(n) : '$0.00')
+  const usd = (n: number) => (n !== 0 ? money(n) : '$0.00')
   const hit = (x: Stats) => {
     const total = x.read + x.write + x.input
     return total ? `${Math.round((x.read / total) * 100)}%` : '–'
@@ -327,8 +401,8 @@ export function statsText(chat: Stats, all: Stats, s: Settings): string {
   const dollars = s.costStyle === 'dollars'
   const rebuilds = (x: Stats) => `${x.rebuilds}${x.rebuilds ? ` (${tokens(x.rebuildTokens)} tokens${dollars ? `, ${usd(x.rebuildUsd)}` : ''})` : ''}`
   const rows: [string, (x: Stats) => string, boolean?][] = [
-    ['Saved by handoffs', x => usd(x.savedUsd), dollars],
-    ['Tokens saved', x => tokens(x.savedTokens)],
+    ['Saved by handoffs (est.)', x => usd(x.savedUsd), dollars],
+    ['Tokens saved (est.)', x => (x.savedTokens < 0 ? `-${tokens(-x.savedTokens)}` : tokens(x.savedTokens))],
     ['Cache hit rate', hit],
     ['Handoffs', x => String(x.handoffs)],
     ['Cold rebuilds paid', rebuilds],
@@ -348,23 +422,28 @@ export function statsText(chat: Stats, all: Stats, s: Settings): string {
 // "183K" / "1.2M" / "850" back to a number (the handoff notice's rounded figures).
 const untokens = (t: string) => Number.parseFloat(t) * (t.endsWith('M') ? 1e6 : t.endsWith('K') ? 1e3 : 1)
 
+type Usage = Record<string, unknown> & { cache_creation?: { ephemeral_1h_input_tokens?: number; ephemeral_5m_input_tokens?: number }; speed?: string }
+
 // A chat's history from its transcript (JSONL), for chats this plugin never counted live.
 // Each request is written once per content block: counted once per message id. A rebuild is a
-// request more than the cache time after the one before (a model switch or /compact also resets the
-// cache, but a transcript doesn't show it, so those rebuilds are counted only live). Handoffs come from this plugin's notice
-// rows (a system row, or the command's output row), never from text that merely quotes one.
-export function statsFromTranscript(jsonl: string, ttlMin: number): Partial<Stats> {
+// request more than the cache time after the one before (the time each write used, from
+// usage.cache_creation), or one that read far less than the chat held (isSilentReset: a model
+// switch, a compaction, fast mode...). Handoffs come from this plugin's notice rows (a system row,
+// or the command's output row), never from text that merely quotes one; only notices of versions
+// before 0.6.0 ("You saved approx") carry a saving, since later ones count it when the new chat is used.
+export function statsFromTranscript(jsonl: string, ttlMin: number, setting: Settings['memoryMinutes'] = 'auto'): Partial<Stats> {
   const out = { replies: 0, read: 0, write: 0, input: 0, rebuilds: 0, rebuildTokens: 0, rebuildUsd: 0, handoffs: 0, savedTokens: 0, savedUsd: 0 }
+  let first: Stats['first']
   const seen = new Set<string>()
-  let prevAt = 0
+  let prev: { at: number; ttl: number; prefix: number; out: number } | null = null
   for (const line of jsonl.split('\n')) {
     if (!line.includes('"usage"') && !line.includes('Handoff saved to')) continue
-    let d: { type?: string; isSidechain?: boolean; timestamp?: string; content?: unknown; message?: { id?: string; model?: string; usage?: Record<string, number> } }
+    let d: { type?: string; isSidechain?: boolean; timestamp?: string; content?: unknown; message?: { id?: string; model?: string; usage?: Usage } }
     try { d = JSON.parse(line) } catch { continue }
     if (d.type === 'system' && typeof d.content === 'string' && /^(?:<local-command-stdout>)?(?:[\w+.-]+: )?Handoff saved to /.test(d.content)) {
       out.handoffs++
-      const m = /You saved approx (\d+(?:\.\d+)?[KM]?) tokens and \$(\d+(?:\.\d+)?)/.exec(d.content)
-      if (m) { out.savedTokens += untokens(m[1]!); out.savedUsd += Number(m[2]) }
+      const m = /You saved approx (\d+(?:\.\d+)?[KM]?) tokens and (<)?\$(\d+(?:\.\d+)?)/.exec(d.content)
+      if (m) { out.savedTokens += untokens(m[1]!); out.savedUsd += m[2] ? 0 : Number(m[3]) }
       continue
     }
     const u = d.message?.usage
@@ -373,31 +452,41 @@ export function statsFromTranscript(jsonl: string, ttlMin: number): Partial<Stat
     if (seen.has(id)) continue
     seen.add(id)
     const at = Date.parse(d.timestamp ?? '')
-    const read = u.cache_read_input_tokens ?? 0, write = u.cache_creation_input_tokens ?? 0
+    const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+    const read = num(u.cache_read_input_tokens), write = num(u.cache_creation_input_tokens), input = num(u.input_tokens), output = num(u.output_tokens)
+    const ttl = learnTtl(setting, u.cache_creation ?? {}, prev?.ttl ?? ttlMin)
+    if (!first) first = { total: input + read + write, read }
     out.replies++
     out.read += read
     out.write += write
-    out.input += u.input_tokens ?? 0
-    if (prevAt && Number.isFinite(at) && at - prevAt > ttlMin * 60_000) {
-      const p = priceOf(d.message.model, read + write)
+    out.input += input
+    const usage = { cache_read_input_tokens: read, cache_creation_input_tokens: write }
+    if (prev && ((Number.isFinite(at) && at - prev.at > prev.ttl * 60_000) || isSilentReset(prev, usage))) {
+      const p = priceOf(d.message.model, input + read + write, u.speed === 'fast')
       out.rebuilds++
       out.rebuildTokens += write
-      out.rebuildUsd += p ? (write * p.input * (ttlMin >= 60 ? 2 : 1.25)) / 1e6 : 0
+      out.rebuildUsd += p ? (write * writeRate(p.input, ttl)) / 1e6 : 0
     }
-    if (Number.isFinite(at)) prevAt = at
+    prev = { at: Number.isFinite(at) ? at : prev?.at ?? 0, ttl, prefix: input + read + write + output, out: output }
   }
-  return out
+  return first ? { ...out, first } : out
 }
 
 // All chats, worked out when asked: every chat's own counts plus the pruned ones' (st:retired).
 // Chats = chats with a reply, plus the retired ones (a resumed retired chat isn't counted twice).
-export function sumStats(chats: unknown[], retired: unknown, now: number): Stats {
+// A chat whose counts st:retired already folded in (its tombstone write failed) is skipped.
+export function sumStats(chats: [key: string, value: unknown][], retired: unknown, now: number): Stats {
+  const folded = (retired as Stats | undefined)?.folded ?? {}
   let all = addStats(retired, {}, now)
-  for (const c of chats) {
+  delete all.folded
+  for (const [k, c] of chats) {
+    const at = (c as { at?: unknown } | null)?.at
+    if (folded[`${k}@${at}`] !== undefined && !(c as Stats).retired) continue
     const x = addStats(c, {}, now)
     all = addStats(all, { ...x, chats: x.replies > 0 && !(c as Stats).retired ? 1 : 0 }, now)
     if (x.since < all.since) all.since = x.since
   }
+  delete all.first
   return all
 }
 

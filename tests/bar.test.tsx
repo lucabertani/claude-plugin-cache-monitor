@@ -15,11 +15,11 @@ const BAR = { plugin: 'cache-monitor', component: 'AbovePrompt', props: { hasSur
 type Body = Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>
 type On = Parameters<Body>[1]
 type Dollar = Parameters<Body>[0]
-type Usage = { read: number; write: number; out?: number; model?: string }
+type Usage = { read: number; write: number; out?: number; model?: string; input?: number; e5m?: number; e1h?: number }
 
 // The engine beneath the plugin (one chat, Opus 5.5, 1M window). Every stand-in is
 // registered here, before the test's first call on $, as the kit requires.
-function engine(on: On, opts: { store?: Record<string, unknown>; state?: unknown; streamMs?: number; brokenStore?: boolean; now?: number } = {}) {
+function engine(on: On, opts: { store?: Record<string, unknown>; state?: unknown; streamMs?: number; brokenStore?: boolean; now?: number; contextTokens?: number } = {}) {
   const clock = mock.clock(on, { now: opts.now ?? T0 })
   if (opts.brokenStore) for (const k of ['store.get', 'store.set', 'store.delete', 'store.keys'] as const) on(k, () => { throw new Error('store broken') })
   else mock.store(on, opts.store)
@@ -28,7 +28,7 @@ function engine(on: On, opts: { store?: Record<string, unknown>; state?: unknown
   const steps = { n: 0 } // main-model requests the engine saw
   on('session.id', () => ({ value: 'chat-1' }))
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
-  on('session.usage', () => ({ value: { startedAt: T0, context: { window: 1_000_000 } } }) as never)
+  on('session.usage', () => ({ value: { startedAt: T0, context: { window: 1_000_000, ...(opts.contextTokens !== undefined ? { tokens: opts.contextTokens } : {}) } } }) as never)
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('classic.SessionStart', () => ({}))
@@ -44,7 +44,10 @@ function engine(on: On, opts: { store?: Record<string, unknown>; state?: unknown
     if (opts.streamMs) await clock.advance(opts.streamMs)
     return {
       turnId: 't', index: 0, answer: '', toolUses: [], stopReason: 'end_turn',
-      usage: { input_tokens: 0, output_tokens: usage.out ?? 0, cache_read_input_tokens: usage.read, cache_creation_input_tokens: usage.write, model: usage.model ?? 'claude-opus-5-5' },
+      usage: {
+        input_tokens: usage.input ?? 0, output_tokens: usage.out ?? 0, cache_read_input_tokens: usage.read, cache_creation_input_tokens: usage.write, model: usage.model ?? 'claude-opus-5-5',
+        ...(usage.e5m !== undefined || usage.e1h !== undefined ? { ephemeral_5m_input_tokens: usage.e5m ?? 0, ephemeral_1h_input_tokens: usage.e1h ?? 0 } : {}),
+      },
     }
   })
   return {
@@ -115,10 +118,10 @@ test('ticks to yellow, then red, with exactly one pop-up', async ($, on) => {
   await w.clock.advance(57 * MIN)
   await expectBar($, '🟡 3:00 min left · next message ≈ $0.05, later ≈ $1.82 (40× more) · 228K / 1M · ⏳ Reply soon or try /cache-monitor-handoff')
   await w.clock.advance(15 * MIN)
-  await expectBar($, '🔴 cache expired · next message ≈ $1.82 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 170K tokens | $1.71')
+  await expectBar($, '🔴 cache expired · next message ≈ $1.82 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 144K tokens | $1.51')
   await w.clock.advance(5 * MIN)
   // the pop-up says exactly what the bar says
-  expect(w.toasts.filter(t => t.includes('🔴 cache expired · next message ≈ $1.82 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 170K tokens | $1.71')).length).toBe(1)
+  expect(w.toasts.filter(t => t.includes('🔴 cache expired · next message ≈ $1.82 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 144K tokens | $1.51')).length).toBe(1)
 })
 
 test('model switch re-prices at once; a resume "switch" does not', async ($, on) => {
@@ -129,7 +132,7 @@ test('model switch re-prices at once; a resume "switch" does not', async ($, on)
   await $.classic.PostModelSwitch({ ...sw, from_model: 'claude-sonnet-5-5', to_model: 'claude-opus-5-5', source: 'resume' } as never)
   expect((await bars($))[0]?.startsWith('🟢')).toBe(true)
   await $.classic.PostModelSwitch({ ...sw, from_model: 'claude-opus-5-5', to_model: 'claude-sonnet-5-5', source: 'command' } as never)
-  await expectBar($, '🔴 cache reset (model changed) · next message ≈ $0.91 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 170K tokens | $0.85')
+  await expectBar($, '🔴 cache reset (model changed) · next message ≈ $0.91 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 144K tokens | $0.75')
 })
 
 // Seen live 2026-11-16: /model switches then /compact left the next reply's countdown at 5:00.
@@ -152,14 +155,14 @@ test('compact resets the cache at once', async ($, on) => {
   await start($)
   await w.reply($, { read: 228_000, write: 0 })
   await $.classic.PostCompact({ trigger: 'manual', compact_summary: 'x'.repeat(40_000) } as never)
-  await expectBar($, '🟠 cache reset (chat compacted) · next message ≈ $0.24 (40× more) · 30K / 1M · Small chat, fine to keep going')
+  await expectBar($, '🟠 cache reset (chat compacted) · next message ≈ $0.08 (14× more) · 30K / 1M · Small rebuild (a new chat costs about as much), fine to keep going')
 })
 
 test('older chat: filled in on resume, no reply needed', async ($, on) => {
   engine(on)
   await start($)
   await $.classic.SessionStart({ source: 'resume', session_id: 'chat-1', seconds_since_last_response: 7200, context_tokens: 290_000, prompt_cache_likely_expired: true, model: 'claude-opus-5-5' } as never)
-  await expectBar($, '🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cache-monitor-handoff to save 232K tokens | $2.21')
+  await expectBar($, '🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cache-monitor-handoff to save 206K tokens | $2.00')
 })
 
 test('/clear goes back to the waiting line', async ($, on) => {
@@ -244,7 +247,7 @@ function handoffEngine(on: On, opts: { reply?: string | null; clearRefusals?: nu
   // the kit has no disk: the skill file's three parts, with real section names
   on('fs.read', (_, e) => {
     if (!String((e as { path: string }).path).replace(/\\/g, '/').endsWith('/hooks/handoff-skill.md')) throw new Error('unexpected read')
-    return { value: '# Final brief\nRole.\n\n## Handoff Confidence\nx\n\n## What Was Tried and Why It Failed\nx\n\n# Closing line\nWrite it now.\n\n# Next-chat instructions\n## Instructions\nGo.' }
+    return { value: '# Final brief\nRole.\n\n## Handoff Confidence\nx\n\n## Last Request from the User\nx\n\n## What Was Tried and Why It Failed\nx\n\n## Next Steps\nx\n\n# Closing line\nWrite it now.\n\n# Next-chat instructions\n## Instructions\nGo.' }
   })
   on('session.messages', () => ({ value: [
     { role: 'user', text: 'ship it', toolUses: [] },
@@ -342,23 +345,46 @@ async function settle(h: { clock: { advance: (ms: number) => Promise<unknown> } 
   }
 }
 
-test('handoff: Haiku fails → a facts-only file is still written', async ($, on) => {
+test('handoff: Haiku returns a failure → like a thrown one: nothing cleared or counted, the facts kept', async ($, on) => {
   const h = handoffEngine(on, { reply: null })
   await start($, 'terminal')
   const r = await handoff($)
+  await settle(h)
+  expect(h.calls.clears).toBe(0)
+  expect(h.calls.fills.length).toBe(0)
+  expect(h.calls.notices.length).toBe(0)
   expect(h.calls.writes[0]!.text).toContain('Haiku did not return a usable brief')
   expect(h.calls.writes[0]!.text).toContain('## Last Real User Message (verbatim)\nship it')
-  expect(h.calls.notices[0]).toContain('facts only')
+  expect(r.text).toMatch(/^cache-monitor: no handoff \(Haiku api-error\)\. This chat is untouched\. The facts extracted in code are in \.claude\/handoffs\/.+\.md, if you want them\.$/)
+  expect(await stats($)).toContain('| Handoffs | 0 | 0 |')
 })
 
-test('handoff: a reply with no sections is not used as a brief', async ($, on) => {
+test('handoff: a reply with no sections is not used as a brief, and nothing is cleared', async ($, on) => {
   const h = handoffEngine(on, { reply: 'Sure! Here is a summary of the chat.' })
   await start($, 'terminal')
   const r = await handoff($)
+  await settle(h)
+  expect(h.calls.clears).toBe(0)
   expect(h.calls.writes[0]!.text.includes('Sure!')).toBe(false)
   // the reason, with Haiku's counts: out at the cap would mean it ran out of room
-  expect(h.calls.notices[0]).toContain("(facts only: Haiku's reply had none of the sections, in 40000 / out 1500 of 64000 tokens)")
-  expect(h.calls.notices[0]).toContain('This command never resent the chat to the main model: no cache read, no rebuild.') // no reply yet, so no bar record
+  expect(r.text).toContain(`(Haiku's reply lacked "Last Request from the User" or "Next Steps", in 40000 / out 1500 of 64000 tokens)`)
+})
+
+test('handoff: a stub reply with only a confidence line is no brief: the chat stays', async ($, on) => {
+  const h = handoffEngine(on, { reply: '## Handoff Confidence\nHigh' })
+  await start($, 'terminal')
+  const r = await handoff($)
+  await settle(h)
+  expect(h.calls.clears).toBe(0)
+  expect(r.text).toContain('This chat is untouched')
+})
+
+test('handoff: the user\'s last message is in the file even when the brief quotes it', async ($, on) => {
+  const h = handoffEngine(on)
+  await start($, 'terminal')
+  await handoff($)
+  expect(h.calls.writes[0]!.text).toContain('## Next Steps\n1. Release.')
+  expect(h.calls.writes[0]!.text).toContain('## Last Real User Message (verbatim)\nship it')
 })
 
 // lets fire-and-forget promises (fill, copy) settle
@@ -383,8 +409,9 @@ test('handoff: on an expired cache the old chat sees the approx saving, net of H
   await h.reply($, { read: 228_000, write: 0 })
   await h.clock.advance(70 * MIN)
   const r = await handoff($)
-  // rebuild 228K on Opus 1h = $1.824; Haiku 40K in + 1.5K out = $0.00475; tokens 228,000 - 41,500
-  expect(h.calls.notices[0]!.endsWith('You saved approx 174K tokens and $1.72.')).toBe(true)
+  // rebuild 228K on Opus 1h = $1.824; beyond a 35K fresh start and the 4K brief: 189K = $1.512;
+  // minus Haiku 40K in + 1.5K out = $0.00475; tokens 189,000 - 41,500
+  expect(h.calls.notices[0]!.endsWith('Continuing in the new chat saves approx 148K tokens and $1.51.')).toBe(true)
 })
 
 test('handoff: a refused notice falls back to the command output, so the line is never lost', async ($, on) => {
@@ -472,7 +499,7 @@ test('weeks away: an 8-day-old record is pruned (7-day rule), and a resume still
   await start($)
   await expectBar($, WAITING) // pruned: kept, it would show its expired record
   await $.classic.SessionStart({ source: 'resume', session_id: 'chat-1', seconds_since_last_response: 30 * 24 * 3600, context_tokens: 290_000, prompt_cache_likely_expired: true, model: 'claude-opus-5-5' } as never)
-  await expectBar($, '🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cache-monitor-handoff to save 232K tokens | $2.21')
+  await expectBar($, '🔴 cache expired · next message ≈ $2.32 (40× more) · 290K / 1M · 🔄 Try /cache-monitor-handoff to save 206K tokens | $2.00')
 })
 
 test('clock set back: a record from the "future" still gives a valid bar', async ($, on) => {
@@ -531,19 +558,24 @@ test('stats: replies, a cold rebuild after expiry, and all chats adding up', asy
   expect(t).toContain('| Cache hit rate | 33% | 33% |')
 })
 
-test('stats: a handoff on an expired chat counts the notice\'s saving and Haiku\'s cost', async ($, on) => {
-  const h = handoffEngine(on)
-  await start($, 'vscode')
+test('stats: a handoff\'s saving counts once, when its line is sent in the new chat', async ($, on) => {
+  const h = handoffEngine(on, { surface: 'desktop' })
+  on('prompt.submit', (_, e) => ({ text: (e as { text: string }).text }) as never)
+  await start($, 'desktop')
   await h.reply($, { read: 228_000, write: 0 })
   await h.clock.advance(70 * MIN)
   await handoff($)
-  const t = await stats($)
-  expect(t).toContain('| Handoffs | 1 | 1 |')
-  // Haiku in the stand-in used 40,000 in / 1,500 out, and the fresh chat's start is 13K:
-  // 228K - 41.5K - 13K = 173.5K; $1.824 - $0.00475 - $0.104 = $1.715
-  expect(t).toContain('| Tokens saved | 174K | 174K |')
-  expect(t).toContain('| Saved by handoffs | $1.72 | $1.72 |')
-  expect(h.calls.notices[0]).toContain('You saved approx 174K tokens and $1.72.')
+  await handoff($) // run twice: two files, one of them used
+  let t = await stats($)
+  expect(t).toContain('| Handoffs | 2 | 2 |')
+  expect(t).toContain('| Tokens saved (est.) | 0 | 0 |') // nothing used yet
+  const line = h.calls.copies[1]!
+  await $.prompt.submit({ text: line, wait: false, origin: { kind: 'composer' } } as never)
+  await $.prompt.submit({ text: line, wait: false, origin: { kind: 'composer' } } as never) // sent again: not counted again
+  t = await stats($)
+  // 228K - 35K fresh start - 4K brief - 41.5K Haiku = 147.5K; $1.824 x 189/228 - $0.00475 = $1.507
+  expect(t).toContain('| Tokens saved (est.) | 148K | 148K |')
+  expect(t).toContain('| Saved by handoffs (est.) | $1.51 | $1.51 |')
 })
 
 test('stats: a broken store still answers /cache-monitor-stats, with zeros', async ($, on) => {
@@ -561,7 +593,8 @@ const TRANSCRIPT = [
 function onDisk(on: On, size: number) {
   const reads = { n: 0 }
   on('fs.stat', () => ({ value: { kind: 'file', size } }) as never)
-  on('fs.read', () => { reads.n++; return { value: TRANSCRIPT } as never })
+  // a whole read; the tail read for the reply's speed (with a length) is not one
+  on('fs.read', (_, e) => { if ((e as { length?: number }).length === undefined) reads.n++; return { value: TRANSCRIPT } as never })
   return reads
 }
 const resume = ($: Dollar) => $.classic.SessionStart({ source: 'resume', session_id: 'chat-1', transcript_path: '/t/chat-1.jsonl', model: 'claude-opus-5-5' } as never)
@@ -756,4 +789,112 @@ test('/cache-monitor-model: a listed name sets the picker; any other id goes to 
   expect(await run('claude-sonnet-5-5-20260401')).toBe('Handoff model set to claude-sonnet-5-5-20260401 (custom). /cache-monitor-handoff uses it from now on.')
   expect(vals).toEqual({ 'cache-monitor.handoffModel': 'custom', 'cache-monitor.handoffModelCustom': 'claude-sonnet-5-5-20260401' })
   expect(await run('not a model')).toContain('is not a model name')
+})
+
+
+// --- 0.6.0: the reviewed cases ------------------------------------------------------------
+test('TTL is learned from each reply: a 5-minute write counts down from 5, and prices writes at 1.25x', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await w.reply($, { read: 0, write: 100_000, e5m: 100_000, e1h: 0 })
+  await w.clock.advance(1 * MIN)
+  await expectBar($, '🟢 4:00 min left · next message ≈ $0.02 · 100K / 1M · ✅ Keep going')
+  await w.reply($, { read: 100_000, write: 0 }) // a pure read keeps the 5-minute lifetime
+  await w.clock.advance(6 * MIN)
+  // 100K x $4 x 1.25 = $0.50; 65K beyond a 35K fresh start = $0.325, under the $0.50 limit
+  await expectBar($, '🟠 cache expired · next message ≈ $0.50 (25× more) · 100K / 1M · Small rebuild (a new chat costs about as much), fine to keep going')
+  await w.reply($, { read: 0, write: 100_000, e5m: 0, e1h: 100_000 })
+  await expectBar($, '🟢 1:00:00 min left · next message ≈ $0.02 · 100K / 1M · ✅ Keep going')
+})
+
+test('the forced 5-minute setting wins over what a reply wrote', { options: { memoryMinutes: '5' } }, async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await w.reply($, { read: 0, write: 50_000, e5m: 0, e1h: 50_000 })
+  await expectBar($, '🟢 5:00 min left · next message ≈ $0.01 · 50K / 1M · ✅ Keep going')
+})
+
+test('resume: the saved record of the last request beats the session-start estimate of its end', async ($, on) => {
+  const w = engine(on, { streamMs: 4 * MIN })
+  await start($)
+  await w.reply($, { read: 50_000, write: 0, out: 1_000 })
+  await w.clock.advance(10 * MIN) // the reply ended 4 min after its start; 10 min since
+  await $.session.end({ sessionId: 'chat-1' } as never)
+  await $.classic.SessionStart({ source: 'resume', session_id: 'chat-1', seconds_since_last_response: 600, context_tokens: 51_000, model: 'claude-opus-5-5' } as never)
+  // from the request's start: 60 - 4 - 10 = 46 min left, not 50
+  await expectBar($, '🟢 46:00 min left · next message ≈ $0.02 · 51K / 1M · ✅ Keep going')
+})
+
+test('compact: a context figure of 0 is no figure, and the system prompt layer stays cached', { }, async ($, on) => {
+  const w = engine(on, { contextTokens: 0 })
+  await start($)
+  await w.reply($, { read: 228_000, write: 0 })
+  await $.classic.PostCompact({ trigger: 'manual', compact_summary: 'x'.repeat(40_000) } as never)
+  // 10K summary + 20K system layer = 30K: 20K read at $0.20/M + 10K written at $8/M = $0.084
+  await expectBar($, '🟠 cache reset (chat compacted) · next message ≈ $0.08 (14× more) · 30K / 1M · Small rebuild (a new chat costs about as much), fine to keep going')
+})
+
+test('stats: a reply that read far less than the chat held while warm counts as a rebuild', async ($, on) => {
+  const w = engine(on)
+  await start($)
+  await w.reply($, { read: 200_000, write: 0 })
+  await w.clock.advance(5 * MIN)
+  await w.reply($, { read: 20_000, write: 180_000, e5m: 0, e1h: 180_000 }) // fast mode toggled, effort changed...
+  expect(await stats($)).toContain('| Cold rebuilds paid | 1 (180K tokens, $1.44) | 1 (180K tokens, $1.44) |')
+})
+
+test('fast mode: read from the transcript, it doubles the price', async ($, on) => {
+  const w = engine(on)
+  on('fs.stat', () => ({ value: { kind: 'file', size: 100 } }) as never)
+  on('fs.read', () => ({ value: JSON.stringify({ type: 'assistant', message: { usage: { speed: 'fast' } } }) }) as never)
+  await start($)
+  await $.classic.SessionStart({ source: 'startup', session_id: 'chat-1', transcript_path: '/t/chat-1.jsonl', model: 'claude-opus-5-5' } as never)
+  await w.reply($, { read: 228_000, write: 0 })
+  await w.clock.advance(70 * MIN)
+  await expectBar($, '🔴 cache expired · next message ≈ $3.65 (40× more) · 228K / 1M · 🔄 Try /cache-monitor-handoff to save 144K tokens | $3.02')
+})
+
+test('stats: a new chat counted live is never replaced by its transcript on a later resume', async ($, on) => {
+  const w = engine(on)
+  let onDiskNow = false
+  const reads = { n: 0 }
+  on('fs.stat', () => { if (!onDiskNow) throw new Error('ENOENT'); return { value: { kind: 'file', size: 1_000 } } as never })
+  on('fs.read', (_, e) => { if ((e as { length?: number }).length === undefined) reads.n++; return { value: TRANSCRIPT } as never })
+  await start($)
+  await $.classic.SessionStart({ source: 'startup', session_id: 'chat-1', transcript_path: '/t/chat-1.jsonl', model: 'claude-opus-5-5' } as never)
+  await w.reply($, { read: 0, write: 50_000 })
+  await $.classic.PostModelSwitch({ source: 'command', from_model: 'claude-opus-5-5', to_model: 'claude-sonnet-5-5', context_tokens: 50_000 } as never)
+  await w.reply($, { read: 0, write: 50_000, model: 'claude-sonnet-5-5' }) // a rebuild only live counting sees
+  await $.session.end({ sessionId: 'chat-1' } as never)
+  onDiskNow = true
+  await resume($)
+  expect(reads.n).toBe(0)
+  const t = await stats($)
+  expect(t).toContain('| Replies | 2 | 2 |')
+  expect(t).toContain('| Cold rebuilds paid | 1 (50K tokens, $0.20) | 1 (50K tokens, $0.20) |')
+})
+
+test('prune: a chat already folded into the totals is not counted twice when its marker write failed', async ($, on) => {
+  const at = T0 - 100 * 24 * 60 * MIN
+  const old = { since: at, at, replies: 2, read: 0, write: 0, input: 0, rebuilds: 0, rebuildTokens: 0, rebuildUsd: 0, handoffs: 0, savedTokens: 0, savedUsd: 0, isFilled: true }
+  const retired = { since: at, replies: 2, read: 0, write: 0, input: 0, rebuilds: 0, rebuildTokens: 0, rebuildUsd: 0, handoffs: 0, savedTokens: 0, savedUsd: 0, chats: 1, folded: { [`st:chat-9@${at}`]: at } }
+  engine(on, { store: { 'st:chat-9': old, 'st:retired': retired } })
+  await start($)
+  expect(await stats($)).toContain('| Replies | 0 | 2 |') // before the prune finishes, too
+  await w8()
+  const t = await stats($)
+  expect(t).toContain('| Replies | 0 | 2 |')
+  expect(t).toContain('| Chats | – | 1 |')
+})
+
+test('prune: a retired chat resumed keeps its new counts, folded in again later', async ($, on) => {
+  const at = T0 - 100 * 24 * 60 * MIN
+  const back = { since: at, at, isFilled: true, retired: true, replies: 3, read: 0, write: 0, input: 0, rebuilds: 0, rebuildTokens: 0, rebuildUsd: 0, handoffs: 0, savedTokens: 0, savedUsd: 0 }
+  const retired = { since: at, replies: 2, read: 0, write: 0, input: 0, rebuilds: 0, rebuildTokens: 0, rebuildUsd: 0, handoffs: 0, savedTokens: 0, savedUsd: 0, chats: 1 }
+  engine(on, { store: { 'st:chat-9': back, 'st:retired': retired } })
+  await start($)
+  await w8()
+  const t = await stats($)
+  expect(t).toContain('| Replies | 0 | 5 |')
+  expect(t).toContain('| Chats | – | 1 |')
 })
