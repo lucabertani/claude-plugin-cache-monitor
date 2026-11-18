@@ -25,7 +25,7 @@ claude plugin validate . >/dev/null
 
 # /cache-monitor-update reads prices.json from main: it must match the bundled table, and a price
 # change needs a new date, or users who downloaded the old table keep it (it wins only if newer)
-bun scripts/prices-json.ts
+node scripts/prices-json.ts
 git diff --quiet prices.json || { echo "prices.json was out of date: commit the regenerated file first"; exit 1; }
 PREV=$(git describe --tags --abbrev=0 2>/dev/null || true)
 if [ -n "$PREV" ] && git cat-file -e "$PREV:prices.json" 2>/dev/null && ! git diff --quiet "$PREV" -- prices.json; then

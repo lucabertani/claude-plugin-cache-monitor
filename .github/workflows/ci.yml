@@ -13,11 +13,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: oven-sh/setup-bun@v2
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code
       - name: prices.json matches the bundled table
-        run: bun scripts/prices-json.ts && git diff --exit-code prices.json
+        run: node scripts/prices-json.ts && git diff --exit-code prices.json
       - name: Validate
         run: claude plugin validate .
       - name: Test

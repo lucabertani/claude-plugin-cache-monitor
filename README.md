@@ -92,7 +92,7 @@ claude plugin validate .
 claude plugin test .
 ```
 
-Logic lives in `hooks/logic.ts` (pure, tested), wiring in `hooks/register.tsx`, the handoff in `hooks/handoff.ts` and the prompt given to the summary model in `hooks/handoff-skill.md`. Prices: `bun scripts/prices-json.ts` regenerates `prices.json` from the bundled table.
+Logic lives in `hooks/logic.ts` (pure, tested), wiring in `hooks/register.tsx`, the handoff in `hooks/handoff.ts` and the prompt given to the summary model in `hooks/handoff-skill.md`. Prices: `node scripts/prices-json.ts` regenerates `prices.json` from the bundled table.
 
 ## License
 
