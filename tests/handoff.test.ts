@@ -45,6 +45,7 @@ test('skill: the three parts are found by name; a missing part is an error', asy
   expect(s.nextChat.includes('{{#priority}}')).toBe(true)
   expect(sectionHeadings(s.brief)).toEqual(['## Handoff Confidence', '## Last Request from the User'])
   expect(() => parseSkill('# Final brief\nx')).toThrow()
+  expect(parseSkill('# Final brief\r\nb\r\n\r\n# Closing line\r\nc\r\n# Next-chat instructions\r\nn\r\n')).toEqual({ brief: 'b', closing: 'c', nextChat: 'n' })
 })
 
 test('facts: edited files, commits from git output only, issues, last real user message', async () => {

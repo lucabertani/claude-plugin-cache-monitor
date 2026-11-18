@@ -172,6 +172,18 @@ async function count($: EngineInterface, d: Partial<Stats>, sessionId?: string) 
   pending.set(key, addStats(pending.get(key), d, 0))
 }
 
+// The installed version, as `claude plugin list --json` reports it; undefined when it can't be read.
+async function installedVersion($: EngineInterface): Promise<string | undefined> {
+  try {
+    const r = await $.process.run(['claude', 'plugin', 'list', '--json'], { timeoutMs: 30_000 })
+    if (r.exitCode !== 0) return undefined
+    const row = (JSON.parse(r.stdout) as { id?: unknown; version?: unknown }[]).find(p => p.id === 'cache-monitor@cache-monitor')
+    return typeof row?.version === 'string' ? row.version : undefined
+  } catch {
+    return undefined
+  }
+}
+
 // A write that fails puts its counts back, so the next flush tries them again. It waits for a
 // prune in progress, so a fold and a write of the same chat never interleave.
 let pruning: Promise<unknown> = Promise.resolve()
@@ -563,7 +575,8 @@ export const register: Register = (on, options) => {
   // updater where the plugin may run it (the terminal); otherwise the reply says how.
   on('command.run', { command: 'cache-monitor-update' }, async $ => {
     const get = async (file: string) => {
-      const r = await $.http.fetch(`${REPO_RAW}/${file}`)
+      // the query string skips the CDN's few-minute cache, so a version pushed just now is seen
+      const r = await $.http.fetch(`${REPO_RAW}/${file}?t=${await $.clock.now()}`)
       if (!r.ok) throw new Error(`${file}: HTTP ${r.status}`)
       return JSON.parse(r.text) as unknown
     }
@@ -577,8 +590,11 @@ export const register: Register = (on, options) => {
       else {
         const run = await $.process.run(['claude', 'plugin', 'update', 'cache-monitor@cache-monitor'], { timeoutMs: 120_000 }).catch((err: unknown) => ({ exitCode: -1, stdout: '', stderr: String(err) }))
         $.ui.log(`cache-monitor: plugin update exit ${run.exitCode}: ${run.stderr.slice(0, 300)}`, { to: 'debug' })
+        // the version the updater really installed (it pulls the repo, which can be newer than the
+        // raw file just read); the raw file's version only when the list can't be read
+        const installed = run.exitCode === 0 ? await installedVersion($) : undefined
         lines.push(run.exitCode === 0
-          ? `Updated cache-monitor ${mine} → ${latest}. Run /reload-plugins (or restart the app) to use it.`
+          ? `Updated cache-monitor ${mine} → ${installed ?? latest}. Run /reload-plugins (or restart the app) to use it.`
           : `Version ${latest} is out (you have ${mine}). To update: in a terminal run \`claude plugin update cache-monitor@cache-monitor\`, or in the desktop app open + → Plugins → Manage plugins. Then run /reload-plugins. Tip: \`/plugin\` → Marketplaces → cache-monitor → Enable auto-update keeps it current.`)
       }
     } catch (err) {

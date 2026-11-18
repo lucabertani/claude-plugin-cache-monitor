@@ -35,7 +35,9 @@ export type Facts = { filesModified: string[]; commits: string[]; issues: string
 export type Numbers = { tokens?: number; window?: number; model?: string; bar?: string }
 
 // The three "# " parts of hooks/handoff-skill.md, by name.
-export function parseSkill(md: string): Skill {
+export function parseSkill(raw: string): Skill {
+  // a Windows checkout (core.autocrlf) has CRLF endings, which the "\n" below would never match
+  const md = raw.replace(/\r\n?/g, '\n')
   const part = (name: string) => {
     const m = new RegExp(`^# ${name}[ \\t]*\\n([\\s\\S]*?)(?=^# |(?![\\s\\S]))`, 'm').exec(md)
     if (!m?.[1]?.trim()) throw new Error(`handoff-skill.md has no "# ${name}" part`)

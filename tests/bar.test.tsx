@@ -640,7 +640,7 @@ test('stats fill-in: a transcript over 4 MiB is not read; the column says since 
   expect(t).toContain('| Replies | 1 | 1 |')
 })
 
-function updateEngine(on: On, o: { latest?: string; prices?: unknown; processExit?: number; offline?: boolean; pricesFail?: boolean; store?: Record<string, unknown> } = {}) {
+function updateEngine(on: On, o: { latest?: string; installed?: string; prices?: unknown; processExit?: number; offline?: boolean; pricesFail?: boolean; store?: Record<string, unknown> } = {}) {
   const w = engine(on, { store: o.store })
   const calls = { argv: [] as string[][], urls: [] as string[] }
   on('fs.read', (_, e) => {
@@ -648,8 +648,8 @@ function updateEngine(on: On, o: { latest?: string; prices?: unknown; processExi
     throw new Error('unexpected read')
   })
   on('http.fetch', (_, e) => {
-    const url = (e as { url: string }).url
-    calls.urls.push(url)
+    const url = (e as { url: string }).url.replace(/\?.*$/, '')
+    calls.urls.push((e as { url: string }).url)
     if (o.offline || (o.pricesFail && url.endsWith('prices.json'))) throw new Error('ENOTFOUND')
     const body = url.endsWith('plugin.json') ? { version: o.latest ?? '0.4.0' } : (o.prices ?? { sourceDate: '2026-12-02', prices: { 'opus-5-5': [4, 0.2], 'opus-6': [5, 0.5] } })
     return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(body) } } as never
@@ -657,7 +657,9 @@ function updateEngine(on: On, o: { latest?: string; prices?: unknown; processExi
   on('process.run', (_, e) => {
     calls.argv.push([...(e as { argv: string[] }).argv])
     if (o.processExit === undefined) throw new Error('not available on this surface')
-    return { value: { exitCode: o.processExit, stdout: '', stderr: '' } } as never
+    const isList = (e as { argv: string[] }).argv[2] === 'list'
+    const stdout = isList && o.installed ? JSON.stringify([{ id: 'other@x', version: '9.9.9' }, { id: 'cache-monitor@cache-monitor', version: o.installed }]) : ''
+    return { value: { exitCode: o.processExit, stdout, stderr: '' } } as never
   })
   on('ui.log', () => ({ value: undefined }))
   return { ...w, calls }
@@ -680,7 +682,14 @@ test('update, newer version: Claude Code\'s updater runs where it may; elsewhere
   const u = updateEngine(on, { latest: '0.5.0', processExit: 0 })
   await start($)
   expect(await runUpdate($)).toContain('Updated cache-monitor 0.4.0 → 0.5.0. Run /reload-plugins')
-  expect(u.calls.argv).toEqual([['claude', 'plugin', 'update', 'cache-monitor@cache-monitor']])
+  expect(u.calls.argv).toEqual([['claude', 'plugin', 'update', 'cache-monitor@cache-monitor'], ['claude', 'plugin', 'list', '--json']])
+})
+
+test('update: the version reported is the one the updater installed, not a stale raw file', async ($, on) => {
+  const u = updateEngine(on, { latest: '0.5.0', installed: '0.5.1', processExit: 0 })
+  await start($)
+  expect(await runUpdate($)).toContain('Updated cache-monitor 0.4.0 → 0.5.1. Run /reload-plugins')
+  expect(u.calls.urls.every(x => /\?t=\d+$/.test(x))).toBe(true)
 })
 
 test('update, newer version but the updater is refused: manual steps, and prices still refreshed', async ($, on) => {
